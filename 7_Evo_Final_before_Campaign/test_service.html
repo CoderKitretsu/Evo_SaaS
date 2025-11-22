@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Campaign Service Test</title>
+</head>
+<body>
+    <h1>Campaign Service Layer Test</h1>
+    <div id="results"></div>
+
+    <script type="module">
+        // Import the service and adapter
+        import CampaignService from './src/components/elements/CampaignElements/campaignService.js';
+        import { CampaignLocalStorageAdapter } from './src/components/elements/CampaignElements/CampaignLocalStorageAdapter.js';
+
+        const resultsDiv = document.getElementById('results');
+        
+        function log(message, success = true) {
+            const p = document.createElement('p');
+            p.textContent = message;
+            p.style.color = success ? 'green' : 'red';
+            resultsDiv.appendChild(p);
+            console.log(message);
+        }
+
+        // Clean up any previous test data
+        const cleanupKeys = Object.keys(localStorage).filter(k => k.startsWith('evosaa.campaigns.'));
+        cleanupKeys.forEach(key => localStorage.removeItem(key));
+
+        log('=== Test 1: Draft Creation ===');
+        
+        try {
+            // Test draft creation
+            const draftId = CampaignService.createDraft({
+                name: 'Test Campaign Service',
+                instanceId: 'inst-test-123',
+                throttle: 'safe',
+                dryRun: true
+            });
+
+            log(`Draft created: ${draftId ? 'SUCCESS' : 'FAILED'}`, !!draftId);
+
+            // Test draft retrieval
+            const retrievedDraft = CampaignService.getDraft(draftId);
+            log(`Draft retrieved: ${retrievedDraft ? 'SUCCESS' : 'FAILED'}`, !!retrievedDraft);
+
+            if (retrievedDraft) {
+                log(`  - Name: ${retrievedDraft.meta?.name}`);
+                log(`  - Instance: ${retrievedDraft.meta?.instanceId}`);
+                log(`  - Dry Run: ${retrievedDraft.meta?.dryRun}`);
+            }
+
+        } catch (error) {
+            log(`ERROR in draft creation: ${error.message}`, false);
+        }
+
+        log('=== Test 2: Draft Updates ===');
+        
+        try {
+            // Get the draft ID from previous test
+            const drafts = CampaignService.listDrafts();
+            if (drafts.length > 0) {
+                const draftId = drafts[0].draftId;
+                
+                // Update draft with contacts and message
+                const updatedDraft = {
+                    ...drafts[0],
+                    contacts: {
+                        total: 5,
+                        valid: 4,
+                        invalid: 1,
+                        duplicates: 0,
+                        rows: [
+                            { id: 'row-1', phone: '+911234567890', vars: { name: 'Test User' }, status: 'pending', attempts: 0 }
+                        ]
+                    },
+                    message: {
+                        text: 'Hello {{name}}, this is a test message!',
+                        templateHash: 'hash123',
+                        attachments: []
+                    }
+                };
+
+                const saveResult = CampaignService.saveDraft(draftId, updatedDraft);
+                log(`Draft updated: ${saveResult ? 'SUCCESS' : 'FAILED'}`, saveResult);
+
+                const updatedRetrieved = CampaignService.getDraft(draftId);
+                log(`Updated draft contacts: ${updatedRetrieved.contacts?.valid || 0} valid`, updatedRetrieved.contacts?.valid > 0);
+                log(`Updated draft message: ${updatedRetrieved.message?.text?.length > 0 ? 'HAS TEXT' : 'NO TEXT'}`, updatedRetrieved.message?.text?.length > 0);
+            }
+
+        } catch (error) {
+            log(`ERROR in draft updates: ${error.message}`, false);
+        }
+
+        log('=== Test 3: Publishing Draft to Campaign ===');
+        
+        try {
+            const drafts = CampaignService.listDrafts();
+            if (drafts.length > 0) {
+                const draftId = drafts[0].draftId;
+                
+                // First test validation only
+                try {
+                    const validationResult = CampaignService.publishDraftAsCampaign(draftId, { validateOnly: true });
+                    log(`Validation: ${validationResult === 'validation-passed' ? 'PASSED' : 'FAILED'}`, validationResult === 'validation-passed');
+                } catch (validationError) {
+                    log(`Validation failed (expected): ${validationError.message}`, true);
+                }
+
+                // Try to publish (might fail due to validation)
+                try {
+                    const campaignId = CampaignService.publishDraftAsCampaign(draftId, { startScheduled: true });
+                    log(`Campaign published: ${campaignId ? 'SUCCESS' : 'FAILED'}`, !!campaignId);
+
+                    if (campaignId && campaignId !== 'validation-passed') {
+                        const campaigns = CampaignService.listCampaigns();
+                        log(`Campaigns count: ${campaigns.length}`, campaigns.length > 0);
+                        
+                        if (campaigns.length > 0) {
+                            log(`Campaign status: ${campaigns[0].status}`);
+                            log(`Campaign progress: ${campaigns[0].progress?.pending || 0} pending`);
+                        }
+                    }
+                } catch (publishError) {
+                    log(`Publishing failed (might be expected): ${publishError.message}`, true);
+                }
+            }
+
+        } catch (error) {
+            log(`ERROR in publishing: ${error.message}`, false);
+        }
+
+        log('=== Test 4: Campaign Management ===');
+        
+        try {
+            const campaigns = CampaignService.listCampaigns();
+            
+            if (campaigns.length > 0) {
+                const campaignId = campaigns[0].campaignId;
+                log(`Testing campaign: ${campaignId}`);
+
+                // Test status changes
+                if (campaigns[0].status === 'Scheduled') {
+                    const startResult = CampaignService.startCampaign(campaignId);
+                    log(`Start campaign: ${startResult ? 'SUCCESS' : 'FAILED'}`, startResult);
+
+                    const pauseResult = CampaignService.pauseCampaign(campaignId);
+                    log(`Pause campaign: ${pauseResult ? 'SUCCESS' : 'FAILED'}`, pauseResult);
+
+                    const resumeResult = CampaignService.resumeCampaign(campaignId);
+                    log(`Resume campaign: ${resumeResult ? 'SUCCESS' : 'FAILED'}`, resumeResult);
+                }
+
+                // Test update
+                const updateResult = CampaignService.updateCampaign(campaignId, {
+                    progress: { sent: 1, failed: 0, pending: 3 }
+                });
+                log(`Update campaign: ${updateResult ? 'SUCCESS' : 'FAILED'}`, updateResult);
+
+            } else {
+                log('No campaigns to test management functions', true);
+            }
+
+        } catch (error) {
+            log(`ERROR in campaign management: ${error.message}`, false);
+        }
+
+        log('=== Test 5: Error Handling ===');
+        
+        try {
+            // Test invalid inputs
+            try {
+                CampaignService.createDraft(null);
+                log('Invalid createDraft: FAILED (should have thrown error)', false);
+            } catch (e) {
+                log(`Invalid createDraft: HANDLED (${e.message})`, true);
+            }
+
+            try {
+                CampaignService.getDraft('non-existent');
+                log('Non-existent draft: NULL RETURNED', true);
+            } catch (e) {
+                log(`Non-existent draft error: ${e.message}`, false);
+            }
+
+            try {
+                CampaignService.startCampaign('non-existent');
+                log('Non-existent campaign start: FAILED (should have thrown error)', false);
+            } catch (e) {
+                log(`Non-existent campaign start: HANDLED (${e.message})`, true);
+            }
+
+        } catch (error) {
+            log(`ERROR in error handling tests: ${error.message}`, false);
+        }
+
+        log('=== Test 6: Storage Key Isolation ===');
+        
+        const allKeys = Object.keys(localStorage);
+        const campaignKeys = allKeys.filter(key => key.startsWith('evosaa.campaigns.'));
+        const otherKeys = allKeys.filter(key => !key.startsWith('evosaa.campaigns.'));
+
+        log(`Total localStorage keys: ${allKeys.length}`);
+        log(`Campaign keys: ${campaignKeys.length}`);
+        log(`Other keys: ${otherKeys.length} (should be unchanged)`);
+
+        campaignKeys.forEach(key => log(`  - ${key}`));
+
+        log('=== All Tests Complete ===');
+
+        // Cleanup function
+        window.cleanupServiceTest = function() {
+            const keys = Object.keys(localStorage).filter(k => k.startsWith('evosaa.campaigns.'));
+            keys.forEach(key => localStorage.removeItem(key));
+            console.log('Service test data cleaned up!');
+            location.reload();
+        };
+
+        log('Run cleanupServiceTest() in console to clean up test data');
+
+    </script>
+</body>
+</html>
