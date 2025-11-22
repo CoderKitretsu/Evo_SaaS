@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Campaign Adapter Test</title>
+</head>
+<body>
+    <h1>Campaign Local Storage Adapter Test</h1>
+    <div id="results"></div>
+
+    <script type="module">
+        // Import the adapter
+        import { CampaignLocalStorageAdapter, switchAdapter } from './src/components/elements/CampaignElements/CampaignLocalStorageAdapter.js';
+
+        const resultsDiv = document.getElementById('results');
+        
+        function log(message, success = true) {
+            const p = document.createElement('p');
+            p.textContent = message;
+            p.style.color = success ? 'green' : 'red';
+            resultsDiv.appendChild(p);
+            console.log(message);
+        }
+
+        // Test 1: Basic functionality
+        log('=== Test 1: Basic Functionality ===');
+        
+        try {
+            // Test draft operations
+            const testDraft = {
+                meta: { name: "Test Campaign", instanceId: "inst-1" },
+                contacts: { total: 5, valid: 5, invalid: 0 },
+                message: { text: "Hello world" }
+            };
+
+            const saveResult = CampaignLocalStorageAdapter.saveDraft("test-draft-1", testDraft);
+            log(`Draft save: ${saveResult ? 'SUCCESS' : 'FAILED'}`, saveResult);
+
+            const retrievedDraft = CampaignLocalStorageAdapter.getDraft("test-draft-1");
+            log(`Draft retrieve: ${retrievedDraft ? 'SUCCESS' : 'FAILED'}`, !!retrievedDraft);
+
+            // Test campaign operations  
+            const testCampaign = {
+                ...testDraft,
+                status: "Scheduled",
+                progress: { sent: 0, failed: 0, pending: 5 }
+            };
+
+            const campaignSaveResult = CampaignLocalStorageAdapter.saveCampaign("test-campaign-1", testCampaign);
+            log(`Campaign save: ${campaignSaveResult ? 'SUCCESS' : 'FAILED'}`, campaignSaveResult);
+
+            const campaigns = CampaignLocalStorageAdapter.listCampaigns();
+            log(`Campaign list count: ${campaigns.length}`, campaigns.length > 0);
+
+        } catch (error) {
+            log(`ERROR: ${error.message}`, false);
+        }
+
+        // Test 2: localStorage key isolation
+        log('=== Test 2: Key Isolation ===');
+        
+        const campaignKeys = [];
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key && key.startsWith('evosaa.campaigns.')) {
+                campaignKeys.push(key);
+            }
+        }
+        
+        log(`Campaign keys found: ${campaignKeys.length}`);
+        campaignKeys.forEach(key => log(`  - ${key}`));
+
+        // Test 3: Error handling
+        log('=== Test 3: Error Handling ===');
+        
+        const invalidResult1 = CampaignLocalStorageAdapter.getDraft(null);
+        log(`Invalid getDraft(null): ${invalidResult1 === null ? 'HANDLED' : 'FAILED'}`, invalidResult1 === null);
+
+        const invalidResult2 = CampaignLocalStorageAdapter.getCampaign("");
+        log(`Invalid getCampaign(""): ${invalidResult2 === null ? 'HANDLED' : 'FAILED'}`, invalidResult2 === null);
+
+        // Test 4: Cleanup
+        log('=== Test 4: Cleanup ===');
+        
+        const deleteResult = CampaignLocalStorageAdapter.deleteDraft("test-draft-1");
+        log(`Draft delete: ${deleteResult ? 'SUCCESS' : 'FAILED'}`, deleteResult);
+
+        const campaignDeleteResult = CampaignLocalStorageAdapter.deleteCampaign("test-campaign-1");
+        log(`Campaign delete: ${campaignDeleteResult ? 'SUCCESS' : 'FAILED'}`, campaignDeleteResult);
+
+        log('=== All Tests Complete ===');
+
+    </script>
+</body>
+</html>

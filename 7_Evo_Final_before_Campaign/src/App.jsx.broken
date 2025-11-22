@@ -1,0 +1,2633 @@
+import { useState, useEffect, useRef } from 'react'
+import './App.css'
+
+function App() {
+  // State management
+  const [connectionState, setConnectionState] = useState('UNKNOWN')
+  const [isModalOpen, setIsModalOpen] = useState(false)
+  const [isReconnectModalOpen, setIsReconnectModalOpen] = useState(false)
+  const [apiUrl, setApiUrl] = useState(localStorage.getItem('apiUrl') || 'http://localhost:8080')
+  const [apiKey, setApiKey] = useState(localStorage.getItem('apiKey') || '')
+  const [instanceName, setInstanceName] = useState('')
+  const [showApiConfig, setShowApiConfig] = useState(false)
+  const [apiConfigured, setApiConfigured] = useState(false)
+  const [qrImage, setQrImage] = useState('')
+  const [statusMsg, setStatusMsg] = useState('')
+  const [reconnectInstance, setReconnectInstance] = useState('')
+  const [showProgress, setShowProgress] = useState(false)
+  const [progressPercent, setProgressPercent] = useState(0)
+  const [progressText, setProgressText] = useState('Waiting for scan...')
+  const [bulkMessage, setBulkMessage] = useState('')
+  const [contactsFile, setContactsFile] = useState(null)
+  const [attachment, setAttachment] = useState(null)
+  const [mediaType, setMediaType] = useState('auto')
+  const [fileNameOverride, setFileNameOverride] = useState('')
+  const [bulkProgress, setBulkProgress] = useState(0)
+  const [progressStats, setProgressStats] = useState('0/0')
+  const [progressLog, setProgressLog] = useState('')
+  
+  // UI state
+  const [showScheduleDropdown, setShowScheduleDropdown] = useState(false)
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false)
+  const [isRenaming, setIsRenaming] = useState(false)
+  const [newFileName, setNewFileName] = useState('')
+  
+  // Instance dropdown state
+  const [availableInstances, setAvailableInstances] = useState([])
+  const [selectedInstance, setSelectedInstance] = useState('')
+  const [showInstanceDropdown, setShowInstanceDropdown] = useState(false)
+  
+  // Column detection state
+  const [detectedColumns, setDetectedColumns] = useState([])
+  const [selectedColumn, setSelectedColumn] = useState('')
+  const [showColumnDropdown, setShowColumnDropdown] = useState(false)
+  const [fileData, setFileData] = useState([])
+  const [lastProcessedFile, setLastProcessedFile] = useState(null)
+  
+  // Keep track of known connected instances to avoid losing state
+  const [knownConnectedInstances, setKnownConnectedInstances] = useState(new Set())
+
+  // Message Scheduler states
+  const [scheduleMode, setScheduleMode] = useState('immediate') // 'immediate' or 'scheduled'
+  const [scheduledDate, setScheduledDate] = useState('')
+  const [scheduledTime, setScheduledTime] = useState('')
+  const [scheduledMessages, setScheduledMessages] = useState([])
+  const [userTimezone, setUserTimezone] = useState(Intl.DateTimeFormat().resolvedOptions().timeZone)
+  const [alert, setAlert] = useState(null)
+
+  // Refs for timers
+  const pollTimer = useRef(null)
+  const rampTimer = useRef(null)
+  const scheduleTimer = useRef(null)
+
+  // Utility functions
+  const qs = (id) => document.getElementById(id)
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms))
+  const sanitizeNumber = (v) => String(v ?? "").replace(/[^\d]/g, "")
+  const guessMediaType = (mime) => mime?.startsWith("image/") ? "image" :
+                                  mime?.startsWith("video/") ? "video" :
+                                  mime?.startsWith("audio/") ? "audio" : "document"
+  const toBase64DataUrl = (f) => new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; r.readAsDataURL(f); })
+
+  const buildHeaders = () => {
+    const key = apiKey.trim()
+    // Use the exact same headers that worked in PowerShell test
+    const h = { 
+      "Content-Type": "application/json",
+      "apikey": key
+    }
+    return h
+  }
+
+  const setConnBadge = (state) => {
+    setConnectionState(state)
+    
+    // Track connected instances to avoid losing state
+    if (state === 'CONNECTED' && (selectedInstance || instanceName)) {
+      setKnownConnectedInstances(prev => new Set([...prev, selectedInstance || instanceName]))
+    } else if (state === 'DISCONNECTED' && (selectedInstance || instanceName)) {
+      setKnownConnectedInstances(prev => {
+        const newSet = new Set(prev)
+        newSet.delete(selectedInstance || instanceName)
+        return newSet
+      })
+    }
+  }
+
+  // Clear alert after delay
+  const showAlert = (type, message) => {
+    setAlert({ type, message })
+    setTimeout(() => setAlert(null), 5000)
+  }
+
+  // Save and test API configuration
+  const saveApiConfiguration = async () => {
+    const trimmedUrl = apiUrl.trim().replace(/\/+$/, "")
+    const trimmedKey = apiKey.trim()
+    
+    if (!trimmedUrl || !trimmedKey) {
+      showAlert('error', 'Please provide both API URL and API Key')
+      return false
+    }
+    
+    try {
+      // Test connection
+      const resp = await fetch(`${trimmedUrl}/instance/fetchInstances?t=${Date.now()}`, { 
+        headers: { 
+          "Content-Type": "application/json",
+          "apikey": trimmedKey
+        }
+      })
+      
+      if (resp.ok) {
+        // Save to localStorage
+        localStorage.setItem('apiUrl', trimmedUrl)
+        localStorage.setItem('apiKey', trimmedKey)
+        
+        setApiConfigured(true)
+        setShowApiConfig(false)
+        showAlert('success', 'API configuration saved successfully!')
+        
+        // Auto-fetch instances
+        fetchInstances()
+        return true
+      } else {
+        showAlert('error', `API test failed: ${resp.status} ${resp.statusText}`)
+        return false
+      }
+    } catch (error) {
+      showAlert('error', `Connection failed: ${error.message}`)
+      return false
+    }
+  }
+
+  // Fetch all instances
+  const fetchInstances = async () => {
+    const baseUrl = apiUrl.trim().replace(/\/+$/, "")
+    if (!baseUrl) return
+
+    try {
+      const resp = await fetch(`${baseUrl}/instance/fetchInstances?t=${Date.now()}`, { 
+        headers: { ...buildHeaders(), 'Cache-Control': 'no-cache' }
+      })
+      if (resp.ok) {
+        const data = await resp.json().catch(() => [])
+        const instances = Array.isArray(data) ? data : (data.instances || [])
+        setAvailableInstances(instances)
+        
+        // If we have a current instance, make sure it's selected
+        if (instanceName && instances.some(inst => (inst.name || inst.instance?.instanceName || inst.instanceName) === instanceName)) {
+          setSelectedInstance(instanceName)
+        } else if (instances.length > 0 && !selectedInstance) {
+          // Auto-select the first instance if none is selected
+          const firstInstance = instances[0]?.name || instances[0]?.instance?.instanceName || instances[0]?.instanceName
+          if (firstInstance) {
+            setSelectedInstance(firstInstance)
+            setInstanceName(firstInstance)
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch instances:', error)
+    }
+  }
+
+  // Check connection status for selected instance
+  const checkInstanceConnection = async (instanceToCheck) => {
+    const baseUrl = apiUrl.trim().replace(/\/+$/, "")
+    if (!baseUrl || !instanceToCheck) return
+
+    try {
+      // First try the connection state endpoint with cache busting
+      const r = await fetch(`${baseUrl}/instance/connectionState/${encodeURIComponent(instanceToCheck)}?t=${Date.now()}`, { 
+        headers: { ...buildHeaders(), 'Cache-Control': 'no-cache' }
+      })
+      
+      if (r.ok) {
+        const d = await r.json().catch(() => ({}))
+        
+        // Try multiple possible response fields
+        const rawState = d.state || d.connection || d.status || d.connectionState || ""
+        const s = String(rawState).toUpperCase()
+        
+        // Map various connection states to our standard states
+        if (['CONNECTED', 'OPEN', 'READY'].includes(s)) {
+          setConnBadge('CONNECTED')
+          return
+        } else if (['CONNECTING', 'OPENING'].includes(s)) {
+          setConnBadge('OPENING')
+          return  
+        } else if (['DISCONNECTED', 'CLOSED'].includes(s)) {
+          setConnBadge('DISCONNECTED')
+          return
+        }
+      }
+      
+      // If the above didn't give a clear result, try to fetch instance info
+      const infoResponse = await fetch(`${baseUrl}/instance/fetchInstances?t=${Date.now()}`, { 
+        headers: { ...buildHeaders(), 'Cache-Control': 'no-cache' }
+      })
+      
+      if (infoResponse.ok) {
+        const instances = await infoResponse.json().catch(() => [])
+        const instanceData = (Array.isArray(instances) ? instances : (instances.instances || [])).find(inst => 
+          (inst.name || inst.instance?.instanceName || inst.instanceName) === instanceToCheck
+        )
+        
+        if (instanceData) {
+          const status = instanceData.instance?.connectionStatus || 
+                        instanceData.connectionStatus || 
+                        instanceData.instance?.state ||
+                        instanceData.state ||
+                        'UNKNOWN'
+          
+          const normalizedStatus = String(status).toUpperCase()
+          
+          if (['CONNECTED', 'OPEN', 'READY'].includes(normalizedStatus)) {
+            setConnBadge('CONNECTED')
+          } else if (['CONNECTING', 'OPENING'].includes(normalizedStatus)) {
+            setConnBadge('OPENING')  
+          } else if (['DISCONNECTED', 'CLOSED'].includes(normalizedStatus)) {
+            setConnBadge('DISCONNECTED')
+          } else {
+            setConnBadge('UNKNOWN')
+          }
+          return
+        }
+      }
+      
+      // If all else fails, set as unknown
+      setConnBadge('UNKNOWN')
+      
+    } catch {
+      setConnBadge('UNKNOWN')
+    }
+  }
+
+  // Instance selection
+  const selectInstance = (instanceToSelect) => {
+    setSelectedInstance(instanceToSelect)
+    setInstanceName(instanceToSelect)
+    setShowInstanceDropdown(false)
+    
+    // Find the instance data to get its current connection status
+    const instanceData = availableInstances.find(inst => 
+      (inst.name || inst.instance?.instanceName || inst.instanceName) === instanceToSelect
+    )
+    
+    // Check if we know this instance was previously connected
+    const wasKnownConnected = knownConnectedInstances.has(instanceToSelect)
+    
+    // Set connection state immediately if we have the data
+    if (instanceData) {
+      const connectionStatus = instanceData.instance?.connectionStatus || 
+                              instanceData.connectionStatus || 
+                              instanceData.instance?.state ||
+                              instanceData.state ||
+                              'UNKNOWN'
+      
+      // Normalize the status - handle both string and nested object cases  
+      const normalizedStatus = String(connectionStatus).toUpperCase()
+      
+      // Map various "connected" states to CONNECTED
+      if (['CONNECTED', 'OPEN', 'READY'].includes(normalizedStatus)) {
+        setConnBadge('CONNECTED')
+      } else if (['CONNECTING', 'OPENING'].includes(normalizedStatus)) {
+        setConnBadge('OPENING')  
+      } else if (['DISCONNECTED', 'CLOSED'].includes(normalizedStatus)) {
+        setConnBadge('DISCONNECTED')
+      } else if (wasKnownConnected) {
+        // If we previously knew this instance was connected but cached data is unclear,
+        // assume it's still connected until we verify otherwise
+        setConnBadge('CONNECTED')
+      } else {
+        setConnBadge('UNKNOWN')
+      }
+    } else if (wasKnownConnected) {
+      // No cached data but we know it was connected - assume still connected
+      setConnBadge('CONNECTED')
+    }
+    
+    // Always do a fresh check when switching instances to ensure accuracy
+    // This prevents stale cached data from causing connection issues
+    setTimeout(async () => {
+      checkInstanceConnection(instanceToSelect)
+      
+      // If this was a previously connected instance but shows disconnected,
+      // try smart reconnect automatically
+      if (wasKnownConnected) {
+        setTimeout(async () => {
+          // Check current status after the connection check
+          if (connectionState === 'DISCONNECTED' || connectionState === 'UNKNOWN') {
+            console.log(`Attempting smart reconnect for previously connected instance: ${instanceToSelect}`)
+            const reconnected = await smartReconnect(instanceToSelect)
+            if (reconnected) {
+              console.log(`Successfully auto-reconnected ${instanceToSelect}`)
+            }
+          }
+        }, 1000) // Wait for connection check to complete first
+      }
+    }, 100) // Small delay to let the UI update first
+    
+    // Clear any existing progress logs when switching instances
+    setProgressLog('')
+    setProgressStats('0/0')
+    setBulkProgress(0)
+  }
+
+  // Modal controls
+  const openModal = () => {
+    // Pre-populate instance name with selected instance if available
+    if (selectedInstance && !instanceName) {
+      setInstanceName(selectedInstance)
+    }
+    setIsModalOpen(true)
+  }
+  const closeModal = () => {
+    setIsModalOpen(false)
+    setShowProgress(false)
+    setQrImage('')
+    setStatusMsg('')
+    clearInterval(pollTimer.current)
+    clearInterval(rampTimer.current)
+  }
+
+  // Reconnect modal controls
+  const openReconnectModal = (instanceToReconnect) => {
+    setReconnectInstance(instanceToReconnect || selectedInstance || instanceName)
+    setIsReconnectModalOpen(true)
+    setQrImage('')
+    setStatusMsg('')
+  }
+  const closeReconnectModal = () => {
+    setIsReconnectModalOpen(false)
+    setShowProgress(false)
+    setQrImage('')
+    setStatusMsg('')
+    setReconnectInstance('')
+    clearInterval(pollTimer.current)
+    clearInterval(rampTimer.current)
+  }
+
+  // Message Scheduling Functions
+  const generateScheduleId = () => Date.now() + Math.random().toString(36).substr(2, 9)
+
+  const formatScheduleDateTime = (date, time) => {
+    if (!date || !time) return null
+    const dateTime = new Date(`${date}T${time}`)
+    return dateTime.toLocaleString('en-US', { 
+      timeZone: userTimezone,
+      dateStyle: 'medium',
+      timeStyle: 'short'
+    })
+  }
+
+  const validateScheduleDateTime = (date, time) => {
+    if (!date || !time) return { valid: false, error: 'Date and time are required' }
+    
+    const scheduleDateTime = new Date(`${date}T${time}`)
+    const now = new Date()
+    
+    if (scheduleDateTime <= now) {
+      return { valid: false, error: 'Schedule time must be in the future' }
+    }
+    
+    return { valid: true }
+  }
+
+  const addScheduledMessage = (messageData) => {
+    const scheduleId = generateScheduleId()
+    const scheduledMessage = {
+      id: scheduleId,
+      ...messageData,
+      status: 'pending',
+      createdAt: new Date().toISOString()
+    }
+    
+    setScheduledMessages(prev => [...prev, scheduledMessage])
+    
+    // Store in localStorage for persistence
+    const stored = JSON.parse(localStorage.getItem('scheduledMessages') || '[]')
+    stored.push(scheduledMessage)
+    localStorage.setItem('scheduledMessages', JSON.stringify(stored))
+    
+    return scheduleId
+  }
+
+  const cancelScheduledMessage = (scheduleId) => {
+    setScheduledMessages(prev => prev.filter(msg => msg.id !== scheduleId))
+    
+    // Update localStorage
+    const stored = JSON.parse(localStorage.getItem('scheduledMessages') || '[]')
+    const filtered = stored.filter(msg => msg.id !== scheduleId)
+    localStorage.setItem('scheduledMessages', JSON.stringify(filtered))
+  }
+
+  // Re-edit scheduled message
+  const reEditScheduledMessage = (scheduledMsg) => {
+    console.log('Re-editing scheduled message:', scheduledMsg)
+    
+    // First cancel the existing message
+    cancelScheduledMessage(scheduledMsg.id)
+    
+    // Pre-fill the form with existing data
+    setBulkMessage(scheduledMsg.message)
+    setScheduleMode('scheduled')
+    
+    // Format the datetime for input fields using the correct field name
+    const scheduledDateTime = new Date(scheduledMsg.scheduleDateTime)
+    const localDateTime = new Date(scheduledDateTime.getTime() - scheduledDateTime.getTimezoneOffset() * 60000)
+    
+    setScheduledDate(localDateTime.toISOString().split('T')[0])
+    setScheduledTime(localDateTime.toTimeString().slice(0, 5))
+    
+    // Pre-fill file data if exists - reload the contacts
+    if (scheduledMsg.contacts && scheduledMsg.contacts.length > 0) {
+      console.log('Setting up fileData with contacts:', scheduledMsg.contacts.length)
+      
+      // Create a mock file data structure
+      const mockFileData = scheduledMsg.contacts.map((contact, index) => ({
+        'Phone': contact,
+        'Name': `Contact ${index + 1}` // Default name if not available
+      }))
+      
+      console.log('Created mockFileData:', mockFileData.slice(0, 2)) // Log first 2 entries
+      
+      setFileData(mockFileData)
+      setLastProcessedFile({name: `Re-editing: ${scheduledMsg.contacts.length} contacts loaded`})
+      
+      // Auto-detect columns
+      if (mockFileData.length > 0) {
+        const columns = Object.keys(mockFileData[0])
+        setDetectedColumns(columns)
+        setSelectedColumn(columns.find(col => col.toLowerCase().includes('phone')) || columns[0])
+        console.log('Set columns:', columns, 'Selected:', columns.find(col => col.toLowerCase().includes('phone')) || columns[0])
+      }
+    } else {
+      console.log('No contacts found in scheduled message:', scheduledMsg)
+    }
+    
+    // Show success message
+    setAlert({ 
+      type: 'success', 
+      message: 'Message loaded for re-editing. Update the schedule and send again.' 
+    })
+    setTimeout(() => setAlert(null), 3000)
+  }
+
+  // Execute scheduled message
+  const executeScheduledMessage = async (scheduledMsg) => {
+    const baseUrl = apiUrl.trim().replace(/\/+$/, "")
+    
+    try {
+      // Update status to sending
+      setScheduledMessages(prev => 
+        prev.map(msg => 
+          msg.id === scheduledMsg.id 
+            ? { ...msg, status: 'sending' }
+            : msg
+        )
+      )
+      
+      setProgressLog(`<div class="text-blue-600">🚀 Executing scheduled message ${scheduledMsg.id}...</div>`)
+      
+      // First, check if the instance is connected
+      const instanceName = scheduledMsg.instanceName || scheduledMsg.instance
+      console.log('SCHEDULED: Using instance name:', instanceName, 'from scheduled message:', {
+        instanceName: scheduledMsg.instanceName, 
+        instance: scheduledMsg.instance
+      })
+      
+      try {
+        const connectionResponse = await fetch(`${baseUrl}/instance/connectionState/${encodeURIComponent(instanceName)}`, {
+          headers: {
+            'apikey': apiKey
+          }
+        })
+        
+        if (!connectionResponse.ok) {
+          throw new Error(`Failed to check connection: ${connectionResponse.status}`)
+        }
+        
+        const connectionData = await connectionResponse.json()
+        console.log('Connection status for scheduled message:', connectionData, 'Instance name used:', instanceName)
+        
+        if (connectionData.instance?.state !== 'open') {
+          throw new Error(`Instance ${instanceName} is not connected (${connectionData.instance?.state || 'unknown'}). Please reconnect the instance first.`)
+        }
+        
+      } catch (connectionError) {
+        setProgressLog(`<div class="text-red-600">❌ Connection check failed: ${connectionError.message}</div>`)
+        throw connectionError
+      }
+      
+      const { contacts, message, instance, attachment, mediaType, fileNameOverride } = scheduledMsg
+      
+      // Send messages one by one
+      let success = 0
+      let failed = 0
+      
+      console.log('Processing contacts:', contacts.slice(0, 3)) // Log first 3 contacts
+      
+      for (let i = 0; i < contacts.length; i++) {
+        const contact = contacts[i]
+        console.log(`Processing contact ${i+1}/${contacts.length}:`, contact)
+        
+        try {
+          let response
+          if (attachment && scheduledMsg.attachmentData) {
+            // Handle attachment sending using stored attachment data
+            const { base64, mimetype, mediatype, fileName } = scheduledMsg.attachmentData
+            
+            console.log('SCHEDULED: Sending media:', {
+              url: `${baseUrl}/message/sendMedia/${encodeURIComponent(instanceName)}`,
+              mediatype,
+              mimetype,
+              fileName,
+              contact
+            })
+            
+            response = await fetch(`${baseUrl}/message/sendMedia/${encodeURIComponent(instanceName)}`, {
+              method: "POST",
+              headers: buildHeaders(),
+              body: JSON.stringify({
+                number: contact,
+                mediatype,
+                mimetype,
+                caption: message || "",
+                media: base64,
+                fileName
+              })
+            })
+          } else if (attachment && !scheduledMsg.attachmentData) {
+            // Attachment was scheduled but data is missing
+            setProgressLog(`<div class="text-red-600">❌ [${i+1}] ${contact} - Attachment data missing</div>`)
+            failed++
+            continue
+          } else {
+            // Send text message
+            // Ensure phone number is properly formatted
+            let formattedNumber = String(contact).trim()
+            
+            // Remove any non-digit characters except +
+            formattedNumber = formattedNumber.replace(/[^\d+]/g, '')
+            
+            // If it doesn't start with +, add country code (assuming India +91 for now)
+            if (!formattedNumber.startsWith('+')) {
+              // If it starts with 91, add +
+              if (formattedNumber.startsWith('91') && formattedNumber.length === 12) {
+                formattedNumber = '+' + formattedNumber
+              } 
+              // If it's 10 digits, add +91
+              else if (formattedNumber.length === 10) {
+                formattedNumber = '+91' + formattedNumber
+              }
+              // If it's 11-12 digits and doesn't start with 91, add +
+              else if (formattedNumber.length >= 11) {
+                formattedNumber = '+' + formattedNumber
+              }
+            }
+            
+            const requestBody = {
+              number: contact,  // Use original contact like immediate messaging
+              text: message
+            }
+            
+            const finalUrl = `${baseUrl}/message/sendText/${encodeURIComponent(instanceName)}`
+            const scheduledHeaders = buildHeaders()
+            const scheduledBody = JSON.stringify(requestBody)
+            
+            console.log('SCHEDULED: Sending message:', {
+              url: finalUrl,
+              instanceName,
+              headers: scheduledHeaders,
+              body: scheduledBody,
+              requestBody,
+              contact,
+              message: message.substring(0, 50)
+            })
+            
+            response = await fetch(finalUrl, {
+              method: "POST",
+              headers: scheduledHeaders,
+              body: scheduledBody
+            })
+          }
+          
+          // Process response for both media and text messages
+          console.log('SCHEDULED: Response:', {
+            ok: response.ok,
+            status: response.status,
+            statusText: response.statusText,
+            headers: Object.fromEntries(response.headers.entries())
+          })
+          
+          if (response.ok) {
+            success++
+            setProgressLog(`<div class="text-green-600">✅ [${i+1}] ${contact}</div>`)
+          } else {
+            const errorText = await response.text().catch(() => 'Unknown error')
+            console.error('SCHEDULED: Message send failed:', {
+              status: response.status,
+              statusText: response.statusText,
+              error: errorText,
+              contact,
+              responseHeaders: Object.fromEntries(response.headers.entries())
+            })
+            failed++
+            
+            // Detailed error messages like immediate messaging
+            if (response.status === 400) {
+              setProgressLog(`<div class="text-red-600">❌ [${i+1}] ${contact} - Invalid request</div>`)
+            } else if (response.status === 401 || response.status === 403) {
+              setProgressLog(`<div class="text-red-600">❌ [${i+1}] ${contact} - Authentication failed</div>`)
+            } else if (response.status === 404) {
+              setProgressLog(`<div class="text-red-600">❌ [${i+1}] ${contact} - Instance not found</div>`)
+            } else if (response.status === 500) {
+              setProgressLog(`<div class="text-red-600">❌ [${i+1}] ${contact} - Server error</div>`)
+            } else {
+              setProgressLog(`<div class="text-red-600">❌ [${i+1}] ${contact} - Error ${response.status}</div>`)
+            }
+          }
+          
+          // Small delay between messages
+          await new Promise(resolve => setTimeout(resolve, 1000))
+          
+        } catch (error) {
+          failed++
+          setProgressLog(`<div class="text-red-600">❌ Error sending to ${contact}: ${error.message}</div>`)
+        }
+      }
+      
+      // Update final status
+      const finalStatus = failed === 0 ? 'sent' : (success === 0 ? 'failed' : 'partial')
+      
+      setScheduledMessages(prev => 
+        prev.map(msg => 
+          msg.id === scheduledMsg.id 
+            ? { ...msg, status: finalStatus, executedAt: new Date().toISOString(), success, failed }
+            : msg
+        )
+      )
+      
+      // Update localStorage
+      const stored = JSON.parse(localStorage.getItem('scheduledMessages') || '[]')
+      const updated = stored.map(msg => 
+        msg.id === scheduledMsg.id 
+          ? { ...msg, status: finalStatus, executedAt: new Date().toISOString(), success, failed }
+          : msg
+      )
+      localStorage.setItem('scheduledMessages', JSON.stringify(updated))
+      
+      setProgressLog(`<div class="text-blue-600">📊 Scheduled message ${scheduledMsg.id} completed: ${success} sent, ${failed} failed</div>`)
+      
+    } catch (error) {
+      // Mark as failed
+      setScheduledMessages(prev => 
+        prev.map(msg => 
+          msg.id === scheduledMsg.id 
+            ? { ...msg, status: 'failed', error: error.message }
+            : msg
+        )
+      )
+      
+      setProgressLog(`<div class="text-red-600">❌ Scheduled message ${scheduledMsg.id} failed: ${error.message}</div>`)
+    }
+  }
+
+  // Check for due scheduled messages
+  const checkScheduledMessages = () => {
+    const now = new Date()
+    const dueMessages = scheduledMessages.filter(msg => {
+      if (msg.status !== 'pending') return false
+      const scheduleTime = new Date(msg.scheduleDateTime)
+      return scheduleTime <= now
+    })
+    
+    // Execute due messages
+    dueMessages.forEach(msg => {
+      executeScheduledMessage(msg)
+    })
+  }
+
+  // Start schedule monitoring
+  const startScheduleMonitoring = () => {
+    if (scheduleTimer.current) {
+      clearInterval(scheduleTimer.current)
+    }
+    
+    // Check every 30 seconds for due messages
+    scheduleTimer.current = setInterval(checkScheduledMessages, 30000)
+  }
+
+  // Stop schedule monitoring
+  const stopScheduleMonitoring = () => {
+    if (scheduleTimer.current) {
+      clearInterval(scheduleTimer.current)
+      scheduleTimer.current = null
+    }
+  }
+
+  // Progress UI
+  const startProgressUI = () => {
+    setShowProgress(true)
+    setProgressPercent(0)
+    setProgressText('Waiting for scan...')
+    // Soft ramp for perceived progress
+    rampTimer.current = setInterval(() => {
+      setProgressPercent(prev => Math.min(95, prev + 2))
+    }, 800)
+  }
+
+  const stopProgressUI = (done = false) => {
+    clearInterval(rampTimer.current)
+    if (done) {
+      setProgressPercent(100)
+      setProgressText('Linked!')
+    }
+  }
+
+  // Connection polling
+  const pollConnection = async () => {
+    clearInterval(pollTimer.current)
+    const baseUrl = apiUrl.trim().replace(/\/+$/, "")
+    const instance = instanceName.trim()
+    if (!baseUrl || !instance) return
+
+    pollTimer.current = setInterval(async () => {
+      try {
+        const r = await fetch(`${baseUrl}/instance/connectionState/${encodeURIComponent(instance)}`, { headers: buildHeaders() })
+        const d = await r.json().catch(()=>({}))
+        const s = (d.state || d.connection || "").toUpperCase()
+        if (s === "CONNECTED") {
+          setConnBadge("CONNECTED")
+          stopProgressUI(true)
+          // Fetch instances to update the dropdown
+          fetchInstances()
+          // Close modal with a slight delay to show success state
+          setTimeout(() => {
+            closeModal()
+          }, 1500)
+          clearInterval(pollTimer.current)
+        } else if (s) {
+          setConnBadge(s)
+          setProgressText(s === "OPENING" ? "Connecting..." : s)
+        }
+      } catch {}
+    }, 2000)
+  }
+
+  // Detect columns in uploaded file
+  const detectColumns = async (file) => {
+    if (!file) return []
+    
+    const ext = file.name.toLowerCase().split(".").pop()
+    let columns = []
+    
+    try {
+      if (ext === "csv") {
+        const text = await file.text()
+        const lines = text.split(/\r?\n/).filter(Boolean)
+        if (lines.length > 0) {
+          columns = lines[0].split(",").map(h => h.trim())
+        }
+      } else if (ext === "xlsx") {
+        const buf = await file.arrayBuffer()
+        const wb = window.XLSX.read(buf, { type:"array" })
+        const ws = wb.Sheets[wb.SheetNames[0]]
+        const rows = window.XLSX.utils.sheet_to_json(ws, { defval:"" })
+        if (rows.length > 0) {
+          columns = Object.keys(rows[0])
+        }
+      }
+      
+      setDetectedColumns(columns)
+      
+      // Auto-select phone number column if found
+      const phoneColumns = ['number', 'phone', 'mobile', 'contact', 'whatsapp']
+      const autoSelected = columns.find(col => 
+        phoneColumns.includes(col.toLowerCase())
+      )
+      
+      if (autoSelected) {
+        setSelectedColumn(autoSelected)
+        setShowColumnDropdown(false)
+      } else {
+        setSelectedColumn('')
+        setShowColumnDropdown(columns.length > 0)
+      }
+      
+      return columns
+    } catch (error) {
+      console.error('Error detecting columns:', error)
+      setDetectedColumns([])
+      setSelectedColumn('')
+      return []
+    }
+  }
+
+  // CSV/XLSX parsing
+  const parseContactsFile = async (file, useSelectedColumn = false) => {
+    if (!selectedColumn && useSelectedColumn) {
+      throw new Error('Please select a column containing phone numbers.')
+    }
+    
+    const ext = file.name.toLowerCase().split(".").pop()
+    if (ext === "csv") {
+      const text = await file.text()
+      const lines = text.split(/\r?\n/).filter(Boolean)
+      const headers = (lines[0]||"").split(",").map(h=>h.trim())
+      
+      let idx = -1
+      if (useSelectedColumn && selectedColumn) {
+        // Use manually selected column
+        idx = headers.indexOf(selectedColumn)
+        if (idx === -1) throw new Error(`Selected column "${selectedColumn}" not found in CSV.`)
+      } else {
+        // Auto-detect column
+        const phoneColumns = ['number', 'phone', 'mobile', 'contact', 'whatsapp']
+        idx = headers.findIndex(h => phoneColumns.includes(h.toLowerCase()))
+        if (idx === -1) throw new Error('CSV must include a column named "number", "phone", "mobile", "contact", or "whatsapp".')
+      }
+      
+      return lines.slice(1).map(l=>{
+        const row = l.split(",")
+        return sanitizeNumber((row[idx]||"").trim())
+      }).filter(Boolean)
+    } else if (ext === "xlsx") {
+      const buf = await file.arrayBuffer()
+      const wb = window.XLSX.read(buf, { type:"array" })
+      const ws = wb.Sheets[wb.SheetNames[0]]
+      const rows = window.XLSX.utils.sheet_to_json(ws, { defval:"" })
+      const keys = Object.keys(rows[0]||{})
+      
+      let kNum = null
+      if (useSelectedColumn && selectedColumn) {
+        // Use manually selected column
+        kNum = keys.find(k => k === selectedColumn)
+        if (!kNum) throw new Error(`Selected column "${selectedColumn}" not found in XLSX.`)
+      } else {
+        // Auto-detect column
+        const phoneColumns = ['number', 'phone', 'mobile', 'contact', 'whatsapp']
+        kNum = keys.find(k => {
+          const lowerKey = k.toLowerCase()
+          return phoneColumns.includes(lowerKey)
+        })
+        if (!kNum) throw new Error('XLSX must include a column named "number", "phone", "mobile", "contact", or "whatsapp".')
+      }
+      
+      return rows.map(r=>sanitizeNumber(r[kNum])).filter(Boolean)
+    }
+    throw new Error("Unsupported file type. Use .csv or .xlsx")
+  }
+
+  // Generate QR and create/connect instance
+  const generateQr = async () => {
+    const baseUrl = apiUrl.trim().replace(/\/+$/, "")
+    // Use selected instance if available, otherwise use the input field
+    const instance = (selectedInstance || instanceName).trim()
+    if (!baseUrl || !instance) { 
+      alert("Enter API URL and Instance Name.")
+      return
+    }
+
+    setQrImage('')
+    setStatusMsg('Checking API connectivity...')
+
+    try {
+      // First, test if API is reachable - use exact same format that worked in PowerShell
+      const testHeaders = {
+        "apikey": apiKey.trim(),
+        "Content-Type": "application/json"
+      }
+      
+      const testResp = await fetch(`${baseUrl}/instance/fetchInstances`, { 
+        method: 'GET',
+        headers: testHeaders 
+      })
+      
+      if (testResp.status === 403) {
+        throw new Error("Invalid API key. Please check your API key and try again.")
+      } else if (!testResp.ok) {
+        throw new Error(`API server error: ${testResp.status}. Check if your API server is running.`)
+      }
+      
+      setStatusMsg('Checking instance...')
+      // First check if instance already exists
+      let instanceExists = false
+      try {
+        const checkResp = await fetch(`${baseUrl}/instance/fetchInstances`, { headers: buildHeaders() })
+        if (checkResp.ok) {
+          const allInstances = await checkResp.json()
+          instanceExists = allInstances.some(inst => 
+            (inst.name || inst.instance?.instanceName || inst.instanceName) === instance
+          )
+        }
+      } catch (err) {
+        console.log('Could not check existing instances:', err)
+      }
+
+      if (instanceExists) {
+        setStatusMsg('Connecting to existing instance...')
+        // Instance exists, just connect to it
+        setConnBadge("OPENING")
+        setSelectedInstance(instance)
+      } else {
+        setStatusMsg('Creating new instance...')
+        // Instance doesn't exist, create it
+        const resp = await fetch(`${baseUrl}/instance/create`, {
+          method: "POST",
+          headers: buildHeaders(),
+          body: JSON.stringify({ instanceName: instance, integration: "WHATSAPP-BAILEYS", qrcode: true })
+        })
+        if (resp.status === 403) throw new Error("403 Forbidden – invalid API key.")
+        const d = await resp.json().catch(()=>({}))
+        if (!resp.ok) throw new Error(d.message || "Instance creation failed.")
+
+        // Immediately switch dashboard on create and select this instance
+        setConnBadge("OPENING")
+        setSelectedInstance(instance)
+      }
+
+      setStatusMsg('Fetching QR code...')
+      await new Promise(r=>setTimeout(r, 900))
+
+      const r2 = await fetch(`${baseUrl}/instance/connect/${encodeURIComponent(instance)}`, { headers: buildHeaders() })
+      const q = await r2.json().catch(()=>({}))
+      const qrBase64 = q.base64 || q.data?.qr || q.qr ||
+                       (q.code && q.code.startsWith("data:image") ? q.code : (q.code ? `data:image/png;base64,${q.code}` : ""))
+      if (qrBase64 && qrBase64.startsWith("data:image")) {
+        setQrImage(qrBase64)
+        setStatusMsg('✅ Scan the QR with WhatsApp Web.')
+      } else if (q.pairingCode) {
+        setStatusMsg(`📱 Pairing code: ${q.pairingCode}`)
+      } else {
+        throw new Error("QR not found in response.")
+      }
+
+      // Show and start progress while polling connection
+      startProgressUI()
+      pollConnection()
+    } catch (err) {
+      setStatusMsg(`❌ ${err.message}`)
+    }
+  }
+
+  // Smart reconnect - tries session restoration first, QR scan as fallback
+  const reconnectToInstance = async () => {
+    const baseUrl = apiUrl.trim().replace(/\/+$/, "")
+    const instance = reconnectInstance.trim()
+    if (!baseUrl || !instance) { 
+      alert("API URL or Instance Name missing.")
+      return
+    }
+
+    setQrImage('')
+    setStatusMsg('Attempting automatic reconnection...')
+
+    try {
+      // Immediately switch to this instance
+      setConnBadge("OPENING")
+      setSelectedInstance(instance)
+
+      // Step 1: Try to restart/restore existing session without QR
+      setStatusMsg('🔄 Trying to restore existing session...')
+      
+      try {
+        // Try restart endpoint first (common in WhatsApp APIs)
+        const restartResp = await fetch(`${baseUrl}/instance/restart/${encodeURIComponent(instance)}`, { 
+          method: "POST",
+          headers: buildHeaders() 
+        })
+        
+        if (restartResp.ok) {
+          setStatusMsg('✅ Session restored! Checking connection...')
+          
+          // Wait a moment for restart to complete
+          await new Promise(r=>setTimeout(r, 2000))
+          
+          // Check if connection is now active
+          const connCheck = await fetch(`${baseUrl}/instance/connectionState/${encodeURIComponent(instance)}`, { 
+            headers: buildHeaders() 
+          })
+          
+          if (connCheck.ok) {
+            const state = await connCheck.json().catch(() => ({}))
+            const status = String(state.state || state.status || '').toUpperCase()
+            
+            if (['CONNECTED', 'OPEN', 'READY'].includes(status)) {
+              setStatusMsg('✅ Reconnected successfully using existing session!')
+              setConnBadge('CONNECTED')
+              setKnownConnectedInstances(prev => new Set([...prev, instance]))
+              
+              // Auto-close modal after success
+              setTimeout(() => {
+                closeReconnectModal()
+              }, 2000)
+              return
+            }
+          }
+        }
+      } catch (restartErr) {
+        console.log('Session restart failed, will try QR method:', restartErr)
+      }
+
+      // Step 2: Session restoration failed, fall back to QR scanning
+      setStatusMsg('⚠️ Session expired. Generating new QR code...')
+      await new Promise(r=>setTimeout(r, 1000))
+
+      const r2 = await fetch(`${baseUrl}/instance/connect/${encodeURIComponent(instance)}`, { headers: buildHeaders() })
+      const q = await r2.json().catch(()=>({}))
+      const qrBase64 = q.base64 || q.data?.qr || q.qr ||
+                       (q.code && q.code.startsWith("data:image") ? q.code : (q.code ? `data:image/png;base64,${q.code}` : ""))
+      if (qrBase64 && qrBase64.startsWith("data:image")) {
+        setQrImage(qrBase64)
+        setStatusMsg('📱 Session expired. Please scan the QR with WhatsApp to reconnect.')
+      } else if (q.pairingCode) {
+        setStatusMsg(`📱 Session expired. Pairing code: ${q.pairingCode}`)
+      } else {
+        throw new Error("Could not restore session or generate QR code.")
+      }
+
+      // Show and start progress while polling connection
+      startProgressUI()
+      pollConnection()
+    } catch (err) {
+      setStatusMsg(`❌ ${err.message}`)
+    }
+  }
+
+  // Generic smart reconnect that can be called anywhere
+  const smartReconnect = async (instanceToReconnect) => {
+    const baseUrl = apiUrl.trim().replace(/\/+$/, "")
+    if (!baseUrl || !instanceToReconnect) return false
+
+    try {
+      // Try session restoration first
+      const restartResp = await fetch(`${baseUrl}/instance/restart/${encodeURIComponent(instanceToReconnect)}`, { 
+        method: "POST",
+        headers: buildHeaders() 
+      })
+      
+      if (restartResp.ok) {
+        // Wait for restart to complete
+        await new Promise(r=>setTimeout(r, 2000))
+        
+        // Check connection status
+        const connCheck = await fetch(`${baseUrl}/instance/connectionState/${encodeURIComponent(instanceToReconnect)}`, { 
+          headers: buildHeaders() 
+        })
+        
+        if (connCheck.ok) {
+          const state = await connCheck.json().catch(() => ({}))
+          const status = String(state.state || state.status || '').toUpperCase()
+          
+          if (['CONNECTED', 'OPEN', 'READY'].includes(status)) {
+            setConnBadge('CONNECTED')
+            setKnownConnectedInstances(prev => new Set([...prev, instanceToReconnect]))
+            return true // Successfully reconnected
+          }
+        }
+      }
+    } catch (err) {
+      console.log('Smart reconnect failed:', err)
+    }
+    
+    return false // Could not auto-reconnect
+  }
+
+  // Preview contacts
+  const previewContacts = async () => {
+    if (!contactsFile) { 
+      alert("Upload a CSV/XLSX first.")
+      return
+    }
+    try {
+      const useManualSelection = selectedColumn && detectedColumns.length > 0
+      const nums = await parseContactsFile(contactsFile, useManualSelection)
+      const preview = nums.slice(0,10).join(", ")
+      const columnUsed = useManualSelection ? selectedColumn : 'auto-detected column'
+      setProgressLog(`<div>Found <strong>${nums.length}</strong> numbers using "${columnUsed}". Preview: ${preview}${nums.length>10?", ...":""}</div>`)
+    } catch (e) {
+      setProgressLog(`<div class="text-red-600">❌ ${e.message}</div>`)
+    }
+  }
+
+  // Bulk send messages
+  const sendBulk = async () => {
+    const baseUrl = apiUrl.trim().replace(/\/+$/, "")
+    // Use selectedInstance (from dropdown) instead of instanceName (input field)
+    const instance = (selectedInstance || instanceName).trim()
+    const message = bulkMessage.trim()
+
+    if (!baseUrl || !instance || !contactsFile) { 
+      alert("API URL, instance, and contacts file are required.")
+      return
+    }
+    if (!message && !attachment) { 
+      alert("Provide a message or an attachment.")
+      return
+    }
+
+    // Handle scheduled messages
+    if (scheduleMode === 'scheduled') {
+      const validation = validateScheduleDateTime(scheduledDate, scheduledTime)
+      if (!validation.valid) {
+        alert(validation.error)
+        return
+      }
+
+      // Get contacts for scheduling
+      let numbers
+      try {
+        console.log('Scheduling debug:', { 
+          hasFileData: !!fileData, 
+          fileDataType: Array.isArray(fileData), 
+          hasContactsFile: !!contactsFile,
+          selectedColumn,
+          detectedColumns: detectedColumns.length 
+        })
+        
+        // If we have fileData already (from re-edit), use it directly
+        if (fileData && Array.isArray(fileData) && fileData.length > 0) {
+          console.log('Using existing fileData for scheduling')
+          const useManualSelection = selectedColumn && detectedColumns.length > 0
+          if (useManualSelection && selectedColumn) {
+            numbers = fileData
+              .map(row => String(row[selectedColumn] || '').trim())
+              .filter(phone => phone && phone !== '')
+          } else {
+            // Auto-detect phone column
+            const phoneColumn = Object.keys(fileData[0] || {}).find(col => 
+              col.toLowerCase().includes('phone') || 
+              col.toLowerCase().includes('mobile') || 
+              col.toLowerCase().includes('number')
+            )
+            if (phoneColumn) {
+              numbers = fileData
+                .map(row => String(row[phoneColumn] || '').trim())
+                .filter(phone => phone && phone !== '')
+            } else {
+              throw new Error('No phone column found in data')
+            }
+          }
+          
+          // Remove duplicates
+          numbers = [...new Set(numbers)]
+          console.log('Processed numbers (after deduplication):', numbers.slice(0, 5), `Total: ${numbers.length}`)
+        } else if (contactsFile) {
+          // Parse from file as usual
+          console.log('Parsing from contacts file')
+          const useManualSelection = selectedColumn && detectedColumns.length > 0
+          numbers = await parseContactsFile(contactsFile, useManualSelection)
+          
+          // Remove duplicates
+          numbers = [...new Set(numbers)]
+          console.log('Parsed numbers (after deduplication):', numbers.slice(0, 5), `Total: ${numbers.length}`)
+        } else {
+          throw new Error('No contacts data available. Please upload a contacts file or re-edit a message with existing contacts.')
+        }
+      } catch (e) {
+        alert(`Error parsing contacts: ${e.message}`)
+        return
+      }
+
+      // Create scheduled message
+      const scheduleDateTime = new Date(`${scheduledDate}T${scheduledTime}`)
+      
+      // Prepare attachment data for scheduled message if needed
+      let attachmentData = null
+      if (attachment) {
+        try {
+          const dataUrl = await toBase64DataUrl(attachment)
+          const mimetype = attachment.type || "application/octet-stream"
+          const mediatype = (mediaType === "auto") ? guessMediaType(mimetype) : mediaType
+          const fileName = fileNameOverride || attachment.name || ("file." + (mimetype.split("/")[1] || "bin"))
+          const base64 = dataUrl.split(",")[1] || dataUrl
+          attachmentData = { base64, mimetype, mediatype, fileName }
+        } catch (error) {
+          alert(`Error processing attachment: ${error.message}`)
+          return
+        }
+      }
+      
+      const scheduleId = addScheduledMessage({
+        instance,
+        instanceName: instance, // Store the instance name explicitly
+        message,
+        contacts: numbers,
+        attachment: attachment ? attachment.name : null,
+        attachmentData, // Store the processed attachment data
+        mediaType,
+        fileNameOverride,
+        scheduleDateTime: scheduleDateTime.toISOString(),
+        totalContacts: numbers.length
+      })
+
+      const formattedDateTime = formatScheduleDateTime(scheduledDate, scheduledTime)
+      setProgressLog(`<div class="text-green-600">✅ Message scheduled successfully!</div>
+        <div class="ml-4 text-sm text-gray-700">
+          • Schedule ID: ${scheduleId}<br>
+          • Send Time: ${formattedDateTime}<br>
+          • Recipients: ${numbers.length} contacts<br>
+          • Instance: ${instance}
+        </div>`)
+      
+      // Reset form
+      setScheduleMode('immediate')
+      setScheduledDate('')
+      setScheduledTime('')
+      return
+    }
+
+    // First verify the instance exists and is accessible
+    try {
+      const verifyResp = await fetch(`${baseUrl}/instance/fetchInstances`, { headers: buildHeaders() })
+      if (verifyResp.ok) {
+        const allInstances = await verifyResp.json()
+        const instanceExists = allInstances.find(inst => 
+          (inst.name || inst.instance?.instanceName || inst.instanceName) === instance
+        )
+        
+        if (!instanceExists) {
+          setProgressLog(`<div class="text-red-600">❌ Instance "${instance}" not found in API. Available instances: ${allInstances.map(i => i.name || i.instanceName).join(', ')}</div>`)
+          return
+        }
+        
+        setProgressLog(`<div class="text-green-600">✅ Instance "${instance}" verified. Connection status: ${instanceExists.connectionStatus || instanceExists.instance?.connectionStatus || 'unknown'}</div>`)
+      }
+    } catch (err) {
+      setProgressLog(`<div class="text-yellow-600">⚠️ Could not verify instance "${instance}". Proceeding anyway...</div>`)
+    }
+
+    // Warn about connection status but allow sending (let API handle the actual validation)
+    if (connectionState !== 'CONNECTED') {
+      setProgressLog(`<div class="text-yellow-600">⚠️ Connection status uncertain for "${instance}". Attempting to send messages...</div>`)
+    }
+
+    setProgressLog('⏳ Reading contacts...')
+    setBulkProgress(0)
+    setProgressStats('0/0')
+
+    let numbers
+    try { 
+      const useManualSelection = selectedColumn && detectedColumns.length > 0
+      numbers = await parseContactsFile(contactsFile, useManualSelection) 
+    } catch (e) { 
+      setProgressLog(`<span class="text-red-600">❌ ${e.message}</span>`)
+      return
+    }
+    if (!numbers.length) { 
+      setProgressLog('❌ No valid numbers found.')
+      return
+    }
+
+    // Prepare media payload if needed
+    let mediaPayload = null
+    if (attachment) {
+      const dataUrl = await toBase64DataUrl(attachment)
+      const mimetype = attachment.type || "application/octet-stream"
+      const mediatype = (mediaType === "auto") ? guessMediaType(mimetype) : mediaType
+      const fileName = fileNameOverride || attachment.name || ("file." + (mimetype.split("/")[1] || "bin"))
+      const base64 = dataUrl.split(",")[1] || dataUrl
+      mediaPayload = { base64, mimetype, mediatype, fileName }
+    }
+
+    setProgressLog(`📤 Sending to <strong>${numbers.length}</strong> contacts...`)
+    let ok=0, fail=0
+    for (let i=0;i<numbers.length;i++) {
+      const num = numbers[i]
+      try {
+        let res
+        if (mediaPayload) {
+          res = await fetch(`${baseUrl}/message/sendMedia/${encodeURIComponent(instance)}`, {
+            method: "POST",
+            headers: buildHeaders(),
+            body: JSON.stringify({
+              number: num,
+              mediatype: mediaPayload.mediatype,
+              mimetype: mediaPayload.mimetype,
+              caption: message || "",
+              media: mediaPayload.base64,
+              fileName: mediaPayload.fileName
+            })
+          })
+        } else {
+          const immediateHeaders = buildHeaders()
+          const immediateBody = JSON.stringify({ number: num, text: message })
+          console.log('IMMEDIATE: Sending to URL:', `${baseUrl}/message/sendText/${encodeURIComponent(instance)}`, {
+            instance,
+            headers: immediateHeaders,
+            body: immediateBody,
+            number: num,
+            text: message
+          })
+          res = await fetch(`${baseUrl}/message/sendText/${encodeURIComponent(instance)}`, {
+            method: "POST",
+            headers: immediateHeaders,
+            body: immediateBody
+          })
+        }
+        
+        console.log('IMMEDIATE: Response:', {
+          ok: res.ok,
+          status: res.status,
+          statusText: res.statusText,
+          headers: Object.fromEntries(res.headers.entries())
+        })
+        
+        if (res.ok) { 
+          ok++
+          setProgressLog(prev => prev + `<div>✅ [${i+1}] ${num}</div>`)
+        } else { 
+          fail++
+          const errorText = await res.text().catch(() => 'Unknown error')
+          if (res.status === 400) {
+            setProgressLog(prev => prev + `<div>❌ [${i+1}] ${num} - Invalid request</div>`)
+          } else if (res.status === 401 || res.status === 403) {
+            setProgressLog(prev => prev + `<div>❌ [${i+1}] ${num} - Authentication failed</div>`)
+          } else if (res.status === 404) {
+            setProgressLog(prev => prev + `<div>❌ [${i+1}] ${num} - Instance not found</div>`)
+          } else {
+            setProgressLog(prev => prev + `<div>❌ [${i+1}] ${num} - Error ${res.status}</div>`)
+          }
+        }
+      } catch (err) {
+        fail++
+        setProgressLog(prev => prev + `<div>⚠️ [${i+1}] ${num} - Connection error</div>`)
+      }
+      const pct = Math.round(((i+1)/numbers.length)*100)
+      setBulkProgress(pct)
+      setProgressStats(`${i+1}/${numbers.length} — ✓${ok} • ✗${fail}`)
+      await sleep(700)
+    }
+    setProgressLog(prev => prev + `<hr><div><strong>Done.</strong> Sent: ${ok}, Failed: ${fail}</div>`)
+  }
+
+  // Save API credentials to localStorage when they change
+  useEffect(() => {
+    localStorage.setItem('apiUrl', apiUrl)
+  }, [apiUrl])
+
+  useEffect(() => {
+    localStorage.setItem('apiKey', apiKey)
+  }, [apiKey])
+
+  // Fetch instances when API credentials change
+  useEffect(() => {
+    if (apiUrl && apiKey) {
+      fetchInstances()
+    }
+  }, [apiUrl, apiKey])
+
+  // Load scheduled messages from localStorage on app startup
+  useEffect(() => {
+    const stored = JSON.parse(localStorage.getItem('scheduledMessages') || '[]')
+    setScheduledMessages(stored)
+  }, [])
+
+  // Start/stop schedule monitoring based on scheduled messages
+  useEffect(() => {
+    const hasPendingMessages = scheduledMessages.some(msg => msg.status === 'pending')
+    
+    if (hasPendingMessages && apiUrl && apiKey) {
+      startScheduleMonitoring()
+      setProgressLog(`<div class="text-blue-600">⏰ Schedule monitoring active - checking for due messages every 30 seconds</div>`)
+    } else {
+      stopScheduleMonitoring()
+    }
+    
+    // Cleanup on unmount
+    return () => stopScheduleMonitoring()
+  }, [scheduledMessages, apiUrl, apiKey])
+
+  // Periodic connection status check for selected instance
+  useEffect(() => {
+    if (!selectedInstance || !apiUrl || !apiKey) return
+
+    const checkInterval = setInterval(() => {
+      checkInstanceConnection(selectedInstance)
+    }, 10000) // Check every 10 seconds
+
+    // Initial check
+    checkInstanceConnection(selectedInstance)
+
+    return () => clearInterval(checkInterval)
+  }, [selectedInstance, apiUrl, apiKey])
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (showInstanceDropdown && !event.target.closest('.relative')) {
+        setShowInstanceDropdown(false)
+      }
+    }
+    
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [showInstanceDropdown])
+
+  // Check API configuration on mount
+  useEffect(() => {
+    const checkApiConfiguration = async () => {
+      const storedUrl = localStorage.getItem('apiUrl')
+      const storedKey = localStorage.getItem('apiKey')
+      
+      if (!storedUrl || !storedKey) {
+        setShowApiConfig(true)
+        setApiConfigured(false)
+        return
+      }
+      
+      // Test API connection
+      try {
+        const resp = await fetch(`${storedUrl.replace(/\/+$/, "")}/instance/fetchInstances?t=${Date.now()}`, { 
+          headers: { 
+            "Content-Type": "application/json",
+            "apikey": storedKey.trim()
+          }
+        })
+        
+        if (resp.ok) {
+          setApiConfigured(true)
+          setShowApiConfig(false)
+          // Auto-fetch instances since API is working
+          fetchInstances()
+        } else {
+          setShowApiConfig(true)
+          setApiConfigured(false)
+        }
+      } catch (error) {
+        setShowApiConfig(true)
+        setApiConfigured(false)
+      }
+    }
+    
+    checkApiConfiguration()
+  }, [])
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      clearInterval(pollTimer.current)
+      clearInterval(rampTimer.current)
+    }
+  }, [])
+
+  // Connection badge helper
+  const getConnectionBadge = () => {
+    const map = {
+      CONNECTED: ["bg-green-100 text-green-800", "Connected"],
+      OPENING: ["bg-yellow-100 text-yellow-800", "Opening"],
+      DISCONNECTED: ["bg-red-100 text-red-800", "Disconnected"],
+      UNKNOWN: ["bg-gray-200 text-gray-700", "Unknown"]
+    }
+    const [cls, label] = map[connectionState] || map.UNKNOWN
+    return { cls, label }
+  }
+
+  const badgeInfo = getConnectionBadge()
+  const isConnected = connectionState === 'CONNECTED'
+  const hasSelectedInstance = selectedInstance || instanceName
+
+  // Show API configuration screen if not configured
+  if (showApiConfig || !apiConfigured) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-emerald-50 via-white to-blue-50 flex items-center justify-center p-4">
+        <div className="glass-pro rounded-2xl p-8 w-full max-w-lg">
+          <div className="text-center mb-8">
+            {/* Professional Logo */}
+            <div className="relative mx-auto mb-6 w-20 h-20">
+              <div className="absolute inset-0 bg-gradient-to-br from-emerald-500 to-emerald-600 rounded-2xl shadow-lg"></div>
+              <div className="relative flex items-center justify-center w-full h-full">
+                <svg className="w-10 h-10 text-white" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.890-5.335 11.893-11.893A11.821 11.821 0 0020.893 3.386"/>
+                </svg>
+              </div>
+            </div>
+            <h1 className="text-3xl font-bold text-heading mb-2">WhatsApp Business Hub</h1>
+            <p className="text-body">Enterprise messaging platform powered by Evolution API</p>
+          </div>
+
+          {alert && (
+            <div className={`mb-6 p-4 rounded-xl text-sm font-medium flex items-center gap-3 ${
+              alert.type === 'success' ? 'badge-success' : 
+              alert.type === 'error' ? 'badge-error' : 
+              alert.type === 'warning' ? 'badge-warning' : 'badge-info'
+            }`}>
+              {alert.type === 'success' && (
+                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                </svg>
+              )}
+              {alert.type === 'error' && (
+                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd"/>
+                </svg>
+              )}
+              <span>{alert.message}</span>
+            </div>
+          )}
+
+          <div className="space-y-6">
+            <div>
+              <label className="block text-sm font-semibold text-gray-800 mb-3 flex items-center gap-2">
+                <svg className="w-4 h-4 text-emerald-600" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M4.083 9h1.946c.089-1.546.383-2.97.837-4.118A6.004 6.004 0 004.083 9zM10 2a8 8 0 100 16 8 8 0 000-16zm0 2c-.076 0-.232.032-.465.262-.238.234-.497.623-.737 1.182-.389.907-.673 2.142-.766 3.556h3.936c-.093-1.414-.377-2.649-.766-3.556-.24-.559-.499-.948-.737-1.182C10.232 4.032 10.076 4 10 4zm3.971 5c-.089-1.546-.383-2.97-.837-4.118A6.004 6.004 0 0115.917 9h-1.946zm-2.003 2H8.032c.093 1.414.377 2.649.766 3.556.24.559.499.948.737 1.182.233.23.389.262.465.262.076 0 .232-.032.465-.262.238-.234.497-.623.737-1.182.389-.907.673-2.142.766-3.556zm1.166 4.118c.454-1.148.748-2.572.837-4.118h1.946a6.004 6.004 0 01-2.783 4.118zm-6.268 0C6.412 13.97 6.118 12.546 6.03 11H4.083a6.004 6.004 0 002.783 4.118z" clipRule="evenodd"/>
+                </svg>
+                API Server URL
+              </label>
+              <input
+                type="text"
+                value={apiUrl}
+                onChange={(e) => setApiUrl(e.target.value)}
+                placeholder="https://your-evolution-api.com"
+                className="input-pro"
+              />
+              <p className="text-caption mt-2">Enter the base URL of your Evolution API server</p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-semibold text-gray-800 mb-3 flex items-center gap-2">
+                <svg className="w-4 h-4 text-emerald-600" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M18 8a6 6 0 01-7.743 5.743L10 14l-1 1-1 1H6v2H2v-4l4.257-4.257A6 6 0 1118 8zm-6-4a1 1 0 100 2 2 2 0 012 2 1 1 0 102 0 4 4 0 00-4-4z" clipRule="evenodd"/>
+                </svg>
+                API Authentication Key
+              </label>
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder="Enter your secure API key"
+                className="input-pro"
+              />
+              <p className="text-caption mt-2">Your API key will be stored securely in browser storage</p>
+            </div>
+
+            <button
+              onClick={saveApiConfiguration}
+              className="btn-primary-pro w-full py-4 text-base flex items-center justify-center gap-3"
+            >
+              <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M6.267 3.455a3.066 3.066 0 001.745-.723 3.066 3.066 0 013.976 0 3.066 3.066 0 001.745.723 3.066 3.066 0 012.812 2.812c.051.643.304 1.254.723 1.745a3.066 3.066 0 010 3.976 3.066 3.066 0 00-.723 1.745 3.066 3.066 0 01-2.812 2.812 3.066 3.066 0 00-1.745.723 3.066 3.066 0 01-3.976 0 3.066 3.066 0 00-1.745-.723 3.066 3.066 0 01-2.812-2.812 3.066 3.066 0 00-.723-1.745 3.066 3.066 0 010-3.976 3.066 3.066 0 00.723-1.745 3.066 3.066 0 012.812-2.812zm7.44 5.252a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+              </svg>
+              Verify & Save Configuration
+            </button>
+
+            {/* Development: Clear config button */}
+            {process.env.NODE_ENV === 'development' && (
+              <button
+                onClick={() => {
+                  localStorage.removeItem('apiUrl')
+                  localStorage.removeItem('apiKey')
+                  setApiConfigured(false)
+                  setShowApiConfig(true)
+                  showAlert('info', 'Configuration cleared for testing')
+                }}
+                className="btn-secondary-pro w-full text-sm mt-4"
+              >
+                🔄 Clear Config (Developer)
+              </button>
+            )}
+
+          </div>
+          
+          {/* Professional Footer */}
+          <div className="text-center mt-8 pt-6 border-t border-gray-100">
+            <p className="text-caption">
+              Secure • Reliable • Professional WhatsApp Business Solutions
+            </p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <>
+      {/* Professional Header */}
+      <header className="glass-pro sticky top-0 z-30 border-b border-gray-100 shadow-lg">
+        <div className="container mx-auto px-6 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            {/* Professional Logo */}
+            <div className="relative w-12 h-12 transform hover:scale-105 transition-all duration-300">
+              <div className="absolute inset-0 bg-gradient-to-br from-emerald-500 to-emerald-600 rounded-xl shadow-lg"></div>
+              <div className="absolute inset-0 bg-gradient-to-br from-emerald-400 to-emerald-500 rounded-xl opacity-0 hover:opacity-100 transition-opacity duration-300"></div>
+              <div className="relative flex items-center justify-center w-full h-full">
+                <svg className="w-6 h-6 text-white drop-shadow-sm" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.890-5.335 11.893-11.893A11.821 11.821 0 0020.893 3.386"/>
+                </svg>
+              </div>
+            </div>
+            <div>
+              <div className="text-xl font-bold bg-gradient-to-r from-emerald-600 to-blue-600 bg-clip-text text-transparent">WhatsApp Business Hub</div>
+              <div className="text-caption">Enterprise messaging platform</div>
+            </div>
+          </div>
+          <div className="flex items-center gap-4">
+            {/* Connection Status Badge */}
+            <div className={`badge-pro ${
+              connectionState === 'CONNECTED' ? 'badge-success' : 
+              connectionState === 'OPENING' ? 'badge-warning' : 'badge-error'
+            }`}>
+              <div className={`w-2 h-2 rounded-full ${
+                connectionState === 'CONNECTED' ? 'bg-green-500' : 
+                connectionState === 'OPENING' ? 'bg-yellow-500' : 'bg-red-500'
+              }`}></div>
+              {badgeInfo.label}
+            </div>
+            
+            {/* API Configuration Button */}
+            <button
+              onClick={() => setShowApiConfig(true)}
+              className="btn-secondary-pro flex items-center gap-2"
+              title="API Configuration"
+            >
+              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd"/>
+              </svg>
+              <span>Settings</span>
+            </button>
+            
+            {/* Professional Instances Dropdown */}
+            {availableInstances.length > 0 && (
+              <div className="relative">
+                <button
+                  onClick={() => setShowInstanceDropdown(!showInstanceDropdown)}
+                  className="btn-secondary-pro flex items-center gap-3 min-w-[200px] justify-between"
+                >
+                  <div className="flex items-center gap-2">
+                    <svg className="w-4 h-4 text-emerald-600" fill="currentColor" viewBox="0 0 20 20">
+                      <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"/>
+                    </svg>
+                    <span className="font-medium">{selectedInstance || 'Select Instance'}</span>
+                  </div>
+                  <svg className={`w-4 h-4 transition-transform duration-200 ${showInstanceDropdown ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path>
+                  </svg>
+                </button>
+                
+                {showInstanceDropdown && (
+                  <div className="absolute right-0 mt-3 w-80 glass-pro rounded-xl z-40 max-h-80 overflow-y-auto border border-gray-200">
+                    {availableInstances.map((instance, index) => {
+                      // Use the primary 'name' field from the API response, with fallbacks
+                      const instanceName = instance.name || instance.instance?.instanceName || instance.instanceName || `Instance ${index + 1}`
+                      const rawConnectionState = instance.instance?.connectionStatus || 
+                                                instance.connectionStatus || 
+                                                instance.instance?.state ||
+                                                instance.state ||
+                                                'Unknown'
+                      
+                      // Normalize connection state
+                      const connectionState = rawConnectionState.toUpperCase()
+                      const isInstanceConnected = ['CONNECTED', 'OPEN', 'READY'].includes(connectionState)
+                      const isInstanceConnecting = ['CONNECTING', 'OPENING'].includes(connectionState)
+                      
+                      return (
+                        <button
+                          key={instanceName}
+                          onClick={() => selectInstance(instanceName)}
+                          className={`w-full px-5 py-4 text-left hover:bg-gradient-to-r hover:from-emerald-50 hover:to-blue-50 transition-all duration-200 border-b border-gray-100 last:border-b-0 ${
+                            selectedInstance === instanceName ? 'bg-gradient-to-r from-emerald-50 to-blue-50 ring-1 ring-emerald-200' : ''
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex-1">
+                              <div className="font-semibold text-gray-800 flex items-center gap-2">
+                                <svg className="w-4 h-4 text-emerald-600" fill="currentColor" viewBox="0 0 20 20">
+                                  <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"/>
+                                </svg>
+                                {instanceName}
+                              </div>
+                              <div className="flex items-center gap-3 mt-2">
+                                <div className={`badge-pro text-xs ${
+                                  isInstanceConnected ? 'badge-success' :
+                                  isInstanceConnecting ? 'badge-info' : 'badge-error'
+                                }`}>
+                                  <div className={`w-2 h-2 rounded-full ${
+                                    isInstanceConnected ? 'bg-green-500' :
+                                    isInstanceConnecting ? 'bg-blue-500' : 'bg-red-500'
+                                  }`}></div>
+                                  {isInstanceConnected ? 'Connected' : 
+                                   isInstanceConnecting ? 'Connecting' : 
+                                   rawConnectionState}
+                                </div>
+                                {isInstanceConnected && (
+                                  <span className="text-xs text-emerald-700 font-medium bg-emerald-100 px-2 py-1 rounded-full">
+                                    Ready to use
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            {selectedInstance === instanceName && (
+                              <svg className="w-5 h-5 text-emerald-600 ml-3" fill="currentColor" viewBox="0 0 20 20">
+                                <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"></path>
+                              </svg>
+                            )}
+                          </div>
+                        </button>
+                      )
+                    })}
+                    <div className="px-4 py-2 border-t border-gray-200 bg-gray-50">
+                      <button
+                        onClick={() => {
+                          setShowInstanceDropdown(false)
+                          fetchInstances()
+                        }}
+                        className="text-xs text-emerald-600 hover:text-emerald-700 font-medium"
+                      >
+                        🔄 Refresh Instances
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            
+            <button 
+              id="openInstanceBtn" 
+              className="btn-primary-pro flex items-center gap-2" 
+              onClick={openModal}
+            >
+              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd"/>
+              </svg>
+              New Instance
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Professional Main Content */}
+      <main className="container mx-auto px-6 py-8 space-y-8">
+        {/* Professional Empty State */}
+        {!hasSelectedInstance && (
+          <section id="emptyState" className="card-pro text-center py-16 hover:shadow-xl transition-all duration-300">
+            <div className="max-w-md mx-auto">
+              {/* Professional Illustration */}
+              <div className="w-24 h-24 mx-auto mb-6 bg-gradient-to-br from-emerald-100 to-blue-100 rounded-full flex items-center justify-center shadow-lg transform hover:scale-105 transition-all duration-300">
+                <svg className="w-12 h-12 text-emerald-600" fill="currentColor" viewBox="0 0 20 20">
+                  <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"/>
+                </svg>
+              </div>
+              <h3 className="text-heading text-2xl mb-3">Get Started with WhatsApp</h3>
+              <p className="text-body mb-8">Create your first WhatsApp instance or select an existing one to begin sending professional messages to your contacts.</p>
+              <button 
+                id="openInstanceBtn2" 
+                className="btn-primary-pro text-lg px-8 py-4 flex items-center gap-3 mx-auto"
+                onClick={openModal}
+              >
+                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd"/>
+                </svg>
+                Create Your First Instance
+              </button>
+            </div>
+          </section>
+        )}
+
+        {/* Professional Messaging Dashboard */}
+        {hasSelectedInstance && (
+          <section id="bulkCard" className="bg-white rounded-xl shadow-md border border-gray-200 p-6">
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 bg-gradient-to-br from-emerald-500 to-emerald-600 rounded-lg flex items-center justify-center">
+                  <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 20 20">
+                    <path d="M2.003 5.884L10 9.882l7.997-3.998A2 2 0 0016 4H4a2 2 0 00-1.997 1.884z"/>
+                    <path d="M18 8.118l-8 4-8-4V14a2 2 0 002 2h12a2 2 0 002-2V8.118z"/>
+                  </svg>
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold text-gray-800">Bulk Messaging Hub</h2>
+                  <p className="text-sm text-gray-600">Send messages to multiple contacts</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-3 py-2 shadow-sm">
+                <div className={`w-2 h-2 rounded-full ${
+                  connectionState === 'CONNECTED' ? 'bg-green-500' : 
+                  connectionState === 'OPENING' ? 'bg-yellow-500' : 'bg-red-500'
+                }`}></div>
+                <span className="text-sm font-medium text-gray-700" id="currentInstance">
+                  {selectedInstance || instanceName || 'No Instance'}
+                </span>
+                <span className={`text-xs px-2 py-1 rounded-full font-medium ${
+                  connectionState === 'CONNECTED' ? 'bg-green-100 text-green-700' : 
+                  connectionState === 'OPENING' ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'
+                }`}>
+                  {badgeInfo.label}
+                </span>
+              </div>
+            </div>
+
+            {/* Dynamic Connection Status Notice */}
+            {hasSelectedInstance && (
+              <div className={`mb-4 p-3 rounded-lg border ${
+                isConnected 
+                  ? 'bg-green-50 border-green-200' 
+                  : connectionState === 'OPENING' 
+                    ? 'bg-blue-50 border-blue-200'
+                    : connectionState === 'DISCONNECTED'
+                      ? 'bg-red-50 border-red-200'
+                      : 'bg-yellow-50 border-yellow-200'
+              }`}>
+                <div className={`flex items-center gap-2 ${
+                  isConnected 
+                    ? 'text-green-800' 
+                    : connectionState === 'OPENING' 
+                      ? 'text-blue-800'
+                      : connectionState === 'DISCONNECTED'
+                        ? 'text-red-800'
+                        : 'text-yellow-800'
+                }`}>
+                  <span>
+                    {isConnected 
+                      ? '✅' 
+                      : connectionState === 'OPENING' 
+                        ? '🔄'
+                        : connectionState === 'DISCONNECTED'
+                          ? '❌'
+                          : '⚠️'
+                    }
+                  </span>
+                  <span className="text-sm font-medium">
+                    Instance "{selectedInstance || instanceName}" is {' '}
+                    {isConnected 
+                      ? 'connected and ready for bulk messaging! No QR scan needed.' 
+                      : connectionState === 'OPENING' 
+                        ? 'connecting... Please wait, checking connection status.'
+                        : connectionState === 'DISCONNECTED'
+                          ? 'disconnected. Click "Connect Instance" below to reconnect.'
+                          : 'not connected. Click "Connect Instance" below to scan QR code.'
+                    }
+                  </span>
+                </div>
+                <div className="mt-2 flex items-center gap-3">
+                  {!isConnected && (
+                    <button 
+                      onClick={() => openReconnectModal(selectedInstance || instanceName)}
+                      className="text-xs text-emerald-600 hover:text-emerald-700 font-medium"
+                    >
+                      🔗 Connect Instance
+                    </button>
+                  )}
+                  <button 
+                    onClick={() => checkInstanceConnection(selectedInstance || instanceName)}
+                    className="text-xs text-blue-600 hover:text-blue-700 font-medium"
+                  >
+                    🔄 Refresh Status
+                  </button>
+                  <button 
+                    onClick={async () => {
+                      const testInstance = selectedInstance || instanceName
+                      if (!testInstance || !apiUrl || !apiKey) return
+                      
+                      setProgressLog('🧪 Testing connection...')
+                      try {
+                        const baseUrl = apiUrl.trim().replace(/\/+$/, "")
+                        const testResponse = await fetch(`${baseUrl}/instance/connectionState/${encodeURIComponent(testInstance)}`, {
+                          headers: buildHeaders()
+                        })
+                        
+                        // First check if instance exists in the API
+                        const allInstancesResp = await fetch(`${baseUrl}/instance/fetchInstances`, { headers: buildHeaders() })
+                        if (allInstancesResp.ok) {
+                          const allInstances = await allInstancesResp.json()
+                          const foundInstance = allInstances.find(inst => 
+                            (inst.name || inst.instance?.instanceName || inst.instanceName) === testInstance
+                          )
+                          
+                          if (foundInstance) {
+                            setProgressLog(`<div class="text-green-600">✅ Instance "${testInstance}" found in API</div>
+                              <div class="ml-4 text-sm text-gray-700">
+                                • API name: "${foundInstance.name}"<br>
+                                • Connection: ${foundInstance.connectionStatus || 'unknown'}
+                              </div>`)
+                          } else {
+                            setProgressLog(`<div class="text-red-600">❌ Instance "${testInstance}" NOT found in API!</div>
+                              <div class="ml-4 text-sm text-gray-700">Available: ${allInstances.map(i => `"${i.name}"`).join(', ')}</div>`)
+                            return
+                          }
+                        }
+
+                        if (testResponse.ok) {
+                          const result = await testResponse.json()
+                          setProgressLog(`<div class="text-green-600">✅ Connection test successful! Status: ${JSON.stringify(result)}</div>`)
+                          // Update the connection badge based on test result
+                          checkInstanceConnection(testInstance)
+                        } else {
+                          setProgressLog(`<div class="text-red-600">❌ Connection test failed! Status: ${testResponse.status}</div>`)
+                        }
+                      } catch (error) {
+                        setProgressLog(`<div class="text-red-600">❌ Connection test error: ${error.message}</div>`)
+                      }
+                    }}
+                    className="text-xs text-purple-600 hover:text-purple-700 font-medium"
+                  >
+                    🧪 Test Connection
+                  </button>
+                  {isConnected && (
+                    <span className="text-xs text-green-600 font-medium">
+                      ✅ Ready for bulk messaging
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* File Upload Section */}
+              <div className="space-y-4">
+                <div className="bg-gradient-to-br from-white to-gray-50 border border-gray-200 rounded-xl p-4 shadow-sm">
+                  <div className="flex items-center justify-between mb-3">
+                    <label className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+                      <svg className="w-4 h-4 text-emerald-600" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd"/>
+                      </svg>
+                      Contact List
+                    </label>
+                    {detectedColumns.length > 0 && (
+                      <button 
+                        onClick={previewContacts}
+                        className="px-3 py-1.5 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors flex items-center gap-1.5"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+                          <path d="M10 12a2 2 0 100-4 2 2 0 000 4z"/>
+                          <path fillRule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clipRule="evenodd"/>
+                        </svg>
+                        Preview
+                      </button>
+                    )}
+                  </div>
+                  
+                  <div className="bg-gray-50 border-2 border-dashed border-gray-300 rounded-lg p-4 text-center hover:border-emerald-400 transition-colors cursor-pointer" onClick={() => document.getElementById('contactsFile').click()}>
+                    {detectedColumns.length > 0 ? (
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 bg-emerald-100 rounded-lg flex items-center justify-center">
+                            <svg className="w-5 h-5 text-emerald-600" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                            </svg>
+                          </div>
+                          <div className="text-left">
+                            <p className="text-sm font-semibold text-emerald-700">File uploaded successfully!</p>
+                            <p className="text-xs text-emerald-600">{detectedColumns.length} columns detected</p>
+                          </div>
+                        </div>
+                        <button className="text-xs text-emerald-600 hover:text-emerald-700 font-medium bg-emerald-50 px-2 py-1 rounded">
+                          Change
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-3 justify-center py-2">
+                        <svg className="w-8 h-8 text-gray-400" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2H4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd"/>
+                        </svg>
+                        <div className="text-left">
+                          <p className="text-sm font-medium text-gray-700">Upload contacts file</p>
+                          <p className="text-xs text-gray-500">CSV, XLSX supported</p>
+                        </div>
+                      </div>
+                    )}
+                    <input 
+                      id="contactsFile" 
+                      type="file" 
+                      accept=".csv,.xlsx"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files[0]
+                        setContactsFile(file)
+                        if (file) {
+                          await detectColumns(file)
+                        } else {
+                          setDetectedColumns([])
+                          setSelectedColumn('')
+                          setShowColumnDropdown(false)
+                        }
+                      }}
+                    />
+                  </div>
+                </div>
+
+                {/* Column Selection */}
+                {detectedColumns.length > 0 && (
+                  <div>
+                    <label className="text-sm font-medium text-gray-700 block mb-2 flex items-center gap-2">
+                      <svg className="w-4 h-4 text-emerald-600" fill="currentColor" viewBox="0 0 20 20">
+                        <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"/>
+                      </svg>
+                      Phone Number Column
+                    </label>
+                    <select
+                      value={selectedColumn}
+                      onChange={(e) => setSelectedColumn(e.target.value)}
+                      className="input-pro w-full"
+                    >
+                        <option value="">Select phone column...</option>
+                        {detectedColumns.map((col, index) => (
+                          <option key={index} value={col}>
+                            {col}
+                          </option>
+                        ))}
+                      </select>
+                    {selectedColumn && (
+                      <p className="text-xs text-emerald-600 mt-1 flex items-center gap-1">
+                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                        </svg>
+                        Using column: "{selectedColumn}"
+                      </p>
+                    )}
+                  </div>
+                )}
+
+
+                        
+                        {/* Emoji picker button */}
+                        <div className="relative">
+                          <button 
+                            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                            className="p-2 text-gray-500 hover:text-yellow-600 hover:bg-yellow-50 rounded-lg transition-colors"
+                            title="Add emoji"
+                          >
+                            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM7 9a1 1 0 100-2 1 1 0 000 2zm7-1a1 1 0 11-2 0 1 1 0 012 0zm-.464 5.535a1 1 0 10-1.415-1.414 3 3 0 01-4.242 0 1 1 0 00-1.415 1.414 5 5 0 007.072 0z" clipRule="evenodd"/>
+                            </svg>
+                          </button>
+                          
+                          {/* Enhanced Emoji picker dropdown */}
+                          {showEmojiPicker && (
+                            <div className="absolute bottom-full left-0 mb-2 bg-white border border-gray-200 rounded-xl shadow-2xl p-4 w-72 z-20 backdrop-blur-sm">
+                              <div className="mb-2">
+                                <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Quick Emojis</h4>
+                              </div>
+                              <div className="grid grid-cols-8 gap-1.5 max-h-36 overflow-y-auto">
+                                {['😀', '😂', '😍', '🥰', '😎', '🤔', '😊', '🙂', '😉', '😋', '😘', '🤗', '😇', '🥺', '😭', '😢', '😡', '😤', '🤯', '🥳', '🤩', '😴', '🤤', '🤭', '🤫', '🤪', '😜', '🤓', '👍', '👎', '👏', '🙌', '👌', '✌️', '🤞', '🤝', '💪', '🙏', '❤️', '💕', '💖', '💯', '🔥', '⭐', '✨', '🎉', '🎊', '🎈'].map((emoji) => (
+                                  <button
+                                    key={emoji}
+                                    onClick={() => {
+                                      setBulkMessage(prev => prev + emoji);
+                                      setShowEmojiPicker(false);
+                                    }}
+                                    className="p-2 hover:bg-emerald-50 hover:scale-110 rounded-lg text-lg transition-all duration-200 transform"
+                                    title={`Add ${emoji}`}
+                                  >
+                                    {emoji}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        
+                        <input 
+                          id="attachment" 
+                          type="file" 
+                          accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip"
+                          className="hidden"
+                          onChange={(e) => setAttachment(e.target.files[0])}
+                        />
+                      </div>
+                      
+                      {/* Integrated Send Button with Dropdown */}
+                      <div className="relative">
+                        <button 
+                          onClick={() => {
+                            if (scheduleMode === 'immediate') {
+                              sendBulk();
+                            } else {
+                              sendBulk();
+                            }
+                          }}
+                          className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium flex items-center transition-colors group overflow-hidden"
+                        >
+                          <div className="px-3 py-2 flex items-center gap-2">
+                            {/* Right-pointing send icon */}
+                            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                              <path d="M2.003 5.884L10 9.882l7.997-3.998A2 2 0 0016 4H4a2 2 0 00-1.997 1.884z"/>
+                              <path d="M18 8.118l-8 4-8-4V14a2 2 0 002 2h12a2 2 0 002-2V8.118z" transform="rotate(-90 10 10)"/>
+                            </svg>
+                            <span>{scheduleMode === 'scheduled' ? 'Schedule' : 'Send'}</span>
+                          </div>
+                          <div 
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setShowScheduleDropdown(!showScheduleDropdown);
+                            }}
+                            className="px-2 py-2 border-l border-emerald-500 hover:bg-emerald-800 transition-colors cursor-pointer"
+                          >
+                            <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd"/>
+                            </svg>
+                          </div>
+                        </button>
+                        
+                        {/* Enhanced Dropdown Menu */}
+                        {showScheduleDropdown && (
+                          <div className="absolute bottom-full right-0 mb-2 bg-white border border-gray-200 rounded-xl shadow-xl p-1 min-w-52 z-20">
+                            <div className="p-2 border-b border-gray-100">
+                              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Send Options</p>
+                            </div>
+                            <button
+                              onClick={() => {
+                                setScheduleMode('immediate');
+                                setShowScheduleDropdown(false);
+                              }}
+                              className={`w-full text-left px-3 py-3 rounded-lg text-sm transition-colors flex items-center gap-3 ${
+                                scheduleMode === 'immediate' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'hover:bg-gray-50'
+                              }`}
+                            >
+                              <div className="w-8 h-8 bg-emerald-100 rounded-full flex items-center justify-center">
+                                <svg className="w-4 h-4 text-emerald-600" fill="currentColor" viewBox="0 0 20 20">
+                                  <path d="M2.003 5.884L10 9.882l7.997-3.998A2 2 0 0016 4H4a2 2 0 00-1.997 1.884z"/>
+                                  <path d="M18 8.118l-8 4-8-4V14a2 2 0 002 2h12a2 2 0 002-2V8.118z" transform="rotate(-90 10 10)"/>
+                                </svg>
+                              </div>
+                              <div>
+                                <p className="font-medium">Send Now</p>
+                                <p className="text-xs text-gray-500">Send messages immediately</p>
+                              </div>
+                              {scheduleMode === 'immediate' && (
+                                <svg className="w-4 h-4 text-emerald-600 ml-auto" fill="currentColor" viewBox="0 0 20 20">
+                                  <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                                </svg>
+                              )}
+                            </button>
+                            <button
+                              onClick={() => {
+                                setScheduleMode('scheduled');
+                                setShowScheduleDropdown(false);
+                              }}
+                              className={`w-full text-left px-3 py-3 rounded-lg text-sm transition-colors flex items-center gap-3 ${
+                                scheduleMode === 'scheduled' ? 'bg-blue-50 text-blue-700 border border-blue-200' : 'hover:bg-gray-50'
+                              }`}
+                            >
+                              <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center">
+                                <svg className="w-4 h-4 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+                                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd"/>
+                                </svg>
+                              </div>
+                              <div>
+                                <p className="font-medium">Schedule Later</p>
+                                <p className="text-xs text-gray-500">Choose date and time</p>
+                              </div>
+                              {scheduleMode === 'scheduled' && (
+                                <svg className="w-4 h-4 text-blue-600 ml-auto" fill="currentColor" viewBox="0 0 20 20">
+                                  <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                                </svg>
+                              )}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <p className="text-xs text-gray-500 mt-1">This message will be sent to all contacts in your list</p>
+                  
+                  {/* Enhanced Attachment info block - show when file is attached */}
+                  {attachment && (
+                    <div className="mt-3 bg-gradient-to-r from-emerald-50 to-green-50 border border-emerald-200 rounded-xl p-4 shadow-sm">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 bg-emerald-100 rounded-xl flex items-center justify-center">
+                            <svg className="w-5 h-5 text-emerald-600" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                            </svg>
+                          </div>
+                          <div className="flex-1">
+                            {isRenaming ? (
+                              <div className="space-y-1">
+                                <input
+                                  type="text"
+                                  value={newFileName}
+                                  onChange={(e) => setNewFileName(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      if (newFileName.trim()) {
+                                        setFileNameOverride(newFileName);
+                                      }
+                                      setIsRenaming(false);
+                                    } else if (e.key === 'Escape') {
+                                      setIsRenaming(false);
+                                      setNewFileName('');
+                                    }
+                                  }}
+                                  placeholder="Enter new filename"
+                                  className="text-sm font-medium text-emerald-700 bg-white border border-emerald-300 rounded-lg px-2 py-1 w-full focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                  autoFocus
+                                />
+                                <p className="text-xs text-gray-500">Press Enter to save, Escape to cancel</p>
+                              </div>
+                            ) : (
+                              <div>
+                                <p className="text-sm font-semibold text-emerald-700">
+                                  {fileNameOverride || attachment.name}
+                                </p>
+                                <p className="text-xs text-emerald-600 flex items-center gap-1">
+                                  <span>Ready to send</span>
+                                  {fileNameOverride && (
+                                    <span className="px-1.5 py-0.5 bg-emerald-200 text-emerald-800 rounded text-[10px] font-medium">
+                                      Renamed
+                                    </span>
+                                  )}
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {!isRenaming && (
+                            <button 
+                              onClick={() => {
+                                setIsRenaming(true);
+                                setNewFileName(fileNameOverride || attachment.name);
+                              }}
+                              className="text-blue-600 hover:text-blue-700 text-xs font-medium bg-blue-50 hover:bg-blue-100 px-2 py-1 rounded-lg transition-colors"
+                              title="Rename file"
+                            >
+                              Rename
+                            </button>
+                          )}
+                          <button 
+                            onClick={() => {
+                              setAttachment(null);
+                              setFileNameOverride('');
+                              setIsRenaming(false);
+                            }}
+                            className="text-red-600 hover:text-red-700 text-xs font-medium bg-red-50 hover:bg-red-100 px-2 py-1 rounded-lg transition-colors"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Message Scheduler - Show only when scheduled mode is selected */}
+                {scheduleMode === 'scheduled' && (
+                  <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl p-6 shadow-sm">
+                    <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-3 mb-4">
+                      <svg className="w-5 h-5 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd"/>
+                      </svg>
+                      Schedule Message Delivery
+                    </h3>
+                    
+                    <div className="bg-white rounded-xl border border-blue-200 p-4 space-y-4 shadow-sm">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div>
+                            <label className="text-sm font-medium text-gray-700 block mb-2 flex items-center gap-2">
+                              <svg className="w-4 h-4 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+                                <path fillRule="evenodd" d="M6 2a1 1 0 00-1 1v1H4a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-1V3a1 1 0 10-2 0v1H7V3a1 1 0 00-1-1zm0 5a1 1 0 000 2h8a1 1 0 100-2H6z" clipRule="evenodd"/>
+                              </svg>
+                              Select Date
+                            </label>
+                            <input
+                              type="date"
+                              value={scheduledDate}
+                              onChange={(e) => setScheduledDate(e.target.value)}
+                              min={new Date().toISOString().split('T')[0]}
+                              className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors text-sm font-medium"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-sm font-medium text-gray-700 block mb-2 flex items-center gap-2">
+                              <svg className="w-4 h-4 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+                                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd"/>
+                              </svg>
+                              Select Time
+                            </label>
+                            <input
+                              type="time"
+                              value={scheduledTime}
+                              onChange={(e) => setScheduledTime(e.target.value)}
+                              className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors text-sm font-medium"
+                            />
+                          </div>
+                        </div>
+                        
+                        <div className="flex items-center gap-2 text-sm text-gray-600 bg-gray-50 rounded-lg p-3">
+                          <svg className="w-4 h-4 text-gray-500" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM4.332 8.027a6.012 6.012 0 011.912-2.706C6.512 5.73 6.974 6 7.5 6A1.5 1.5 0 019 7.5V8a2 2 0 004 0 2 2 0 011.523-1.943A5.977 5.977 0 0116 10c0 .34-.028.675-.083 1H15a2 2 0 00-2 2v2.197A5.973 5.973 0 0110 16v-2a2 2 0 00-2-2 2 2 0 01-2-2 2 2 0 00-1.668-1.973z" clipRule="evenodd"/>
+                          </svg>
+                          Timezone: {userTimezone}
+                        </div>
+                        
+                        {scheduledDate && scheduledTime && (
+                          <div className="bg-blue-50 border-l-4 border-blue-400 rounded-lg p-4">
+                            <div className="flex items-center gap-2">
+                              <svg className="w-5 h-5 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+                                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                              </svg>
+                              <div className="text-sm text-blue-800">
+                                <strong>Scheduled for:</strong> {formatScheduleDateTime(scheduledDate, scheduledTime)}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                  </div>
+                )}
+
+
+              </div>
+
+              {/* Right Column - Actions & Progress */}
+              <div className="space-y-4">
+                {/* Send Actions */}
+                <div className="bg-gradient-to-r from-white to-gray-50 border border-gray-200 rounded-xl p-6 shadow-sm">
+                  <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-3 mb-4">
+                    <svg className="w-5 h-5 text-emerald-600" fill="currentColor" viewBox="0 0 20 20">
+                      <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"/>
+                    </svg>
+                    Send Actions
+                  </h3>
+
+                  <div className="space-y-3">
+                    <button 
+                      id="sendBulkBtn" 
+                      className={`w-full py-4 text-sm font-semibold rounded-xl flex items-center justify-center gap-3 transition-all transform hover:scale-[1.02] active:scale-[0.98] ${
+                        scheduleMode === 'scheduled' 
+                          ? 'bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white shadow-lg hover:shadow-xl' 
+                          : 'bg-gradient-to-r from-emerald-600 to-emerald-700 hover:from-emerald-700 hover:to-emerald-800 text-white shadow-lg hover:shadow-xl'
+                      }`} 
+                      onClick={sendBulk}
+                    >
+                      {scheduleMode === 'scheduled' ? (
+                        <>
+                          <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd"/>
+                          </svg>
+                          Schedule Messages
+                        </>
+                      ) : (
+                        <>
+                          <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                            <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"/>
+                          </svg>
+                          Send to All Contacts
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Progress Section - Only show when there's progress */}
+                {(bulkProgress > 0 || progressLog) && (
+                  <div className="card-pro bg-gradient-to-br from-gray-50 to-slate-50 mt-6">
+                    <h3 className="text-subheading mb-4 flex items-center gap-2">
+                      <svg className="w-5 h-5 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                      </svg>
+                      Progress Report 
+                    </h3>
+                    
+                    <div className="space-y-4">
+                      <div className="w-full bg-gray-100 rounded-full h-2">
+                        <div id="progressBar" className="bg-emerald-600 h-2 rounded-full transition-all duration-300" style={{width: `${bulkProgress}%`}}></div>
+                      </div>
+                      <div className="text-sm text-gray-600" id="progressStats">{progressStats}</div>
+                      {progressLog && (
+                        <div className="bg-gray-50 rounded-lg p-4 border border-gray-200 max-h-64 overflow-y-auto">
+                          <div id="progressLog" dangerouslySetInnerHTML={{__html: progressLog}}></div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* Scheduled Messages Dashboard - Only show when instance is selected */}
+        {selectedInstance && scheduledMessages.length > 0 && (
+          <section className="bg-white rounded-xl shadow-md p-6 border border-gray-200 mt-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-bold text-gray-800 flex items-center">
+                📅 Scheduled Messages ({scheduledMessages.filter(msg => msg.instanceName === selectedInstance).length})
+              </h2>
+              {scheduledMessages.some(msg => msg.status === 'pending') && (
+                <div className="flex items-center space-x-2 text-sm">
+                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                  <span className="text-green-600 font-medium">Monitoring Active</span>
+                </div>
+              )}
+            </div>
+            
+            <div className="space-y-3">
+              {scheduledMessages.filter(msg => msg.instanceName === selectedInstance).map((msg) => (
+                <div key={msg.id} className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                  <div className="flex justify-between items-start">
+                    <div className="flex-1">
+                      <div className="flex items-center space-x-3 mb-2">
+                        <span className={`px-2 py-1 text-xs rounded-full font-medium ${
+                          msg.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
+                          msg.status === 'sending' ? 'bg-blue-100 text-blue-800' :
+                          msg.status === 'sent' ? 'bg-green-100 text-green-800' :
+                          msg.status === 'partial' ? 'bg-orange-100 text-orange-800' :
+                          'bg-red-100 text-red-800'
+                        }`}>
+                          {msg.status === 'sending' ? '🚀 SENDING' : msg.status.toUpperCase()}
+                        </span>
+                        <span className="text-sm font-medium text-gray-800">
+                          ID: {msg.id.substring(0, 8)}...
+                        </span>
+                        {(msg.status === 'sent' || msg.status === 'partial' || msg.status === 'failed') && (
+                          <span className="text-xs text-gray-500">
+                            Executed: {new Date(msg.executedAt).toLocaleString()}
+                          </span>
+                        )}
+                      </div>
+                      
+                      <div className="grid grid-cols-2 gap-4 text-sm text-gray-600">
+                        <div>
+                          <div><strong>📅 Scheduled:</strong> {new Date(msg.scheduleDateTime).toLocaleString()}</div>
+                          <div><strong>📱 Instance:</strong> {msg.instance}</div>
+                          {msg.status === 'pending' && (
+                            <div className="text-blue-600">
+                              <strong>⏳ Due in:</strong> {Math.max(0, Math.ceil((new Date(msg.scheduleDateTime) - new Date()) / 60000))} minutes
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <div><strong>👥 Recipients:</strong> {msg.totalContacts} contacts</div>
+                          <div><strong>📄 Attachment:</strong> {msg.attachment || 'None'}</div>
+                          {(msg.success !== undefined || msg.failed !== undefined) && (
+                            <div className={`font-medium ${
+                              msg.status === 'sent' ? 'text-green-600' : 
+                              msg.status === 'failed' ? 'text-red-600' : 'text-orange-600'
+                            }`}>
+                              ✅ {msg.success || 0} sent, ❌ {msg.failed || 0} failed
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      
+                      <div className="mt-2 p-2 bg-white rounded border text-sm text-gray-700">
+                        <strong>Message:</strong> {msg.message.substring(0, 100)}{msg.message.length > 100 ? '...' : ''}
+                      </div>
+                    </div>
+                    
+                    <div className="ml-4 space-y-2">
+                      {msg.status === 'pending' && (
+                        <>
+                          <button
+                            onClick={() => executeScheduledMessage(msg)}
+                            className="block text-blue-600 hover:text-blue-800 text-sm font-medium"
+                          >
+                            ▶️ Execute Now
+                          </button>
+                          <button
+                            onClick={() => {
+                              if (confirm('Are you sure you want to cancel this scheduled message?')) {
+                                cancelScheduledMessage(msg.id)
+                              }
+                            }}
+                            className="block text-red-600 hover:text-red-800 text-sm font-medium"
+                          >
+                            🗑️ Cancel
+                          </button>
+                        </>
+                      )}
+                      
+                      {msg.status === 'failed' && (
+                        <>
+                          <button
+                            onClick={() => reEditScheduledMessage(msg)}
+                            className="block text-orange-600 hover:text-orange-800 text-sm font-medium"
+                          >
+                            ✏️ Re-edit
+                          </button>
+                          <button
+                            onClick={() => executeScheduledMessage(msg)}
+                            className="block text-blue-600 hover:text-blue-800 text-sm font-medium"
+                          >
+                            🔄 Retry Now
+                          </button>
+                          <button
+                            onClick={() => {
+                              if (confirm('Are you sure you want to delete this failed message?')) {
+                                cancelScheduledMessage(msg.id)
+                              }
+                            }}
+                            className="block text-red-600 hover:text-red-800 text-sm font-medium"
+                          >
+                            🗑️ Delete
+                          </button>
+                        </>
+                      )}
+                      
+                      {(msg.status === 'sent' || msg.status === 'partial') && (
+                        <button
+                          onClick={() => {
+                            if (confirm('Are you sure you want to delete this completed message?')) {
+                              cancelScheduledMessage(msg.id)
+                            }
+                          }}
+                          className="block text-gray-600 hover:text-gray-800 text-sm font-medium"
+                        >
+                          🗑️ Delete
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+      </main>
+
+      {/* Create Instance Modal */}
+      {isModalOpen && (
+        <div id="instanceModal" className="modal open items-center justify-center bg-black/40">
+          <div className="glass w-[560px] rounded-2xl p-6 relative">
+            <button id="closeModal" className="absolute right-3 top-3 text-gray-500 hover:text-gray-700 text-xl" onClick={closeModal}>&times;</button>
+            <h3 className="text-xl font-semibold text-gray-800 mb-1">Create / Link WhatsApp Instance</h3>
+            <p className="text-sm text-gray-500 mb-4">Enter details to generate a QR and link WhatsApp.</p>
+
+            <label className="text-gray-700 font-semibold text-sm block mb-1">API Base URL</label>
+            <input 
+              id="apiUrl" 
+              type="text" 
+              placeholder="http://localhost:8080"
+              className="border border-gray-300 rounded-lg px-3 py-2 w-full mb-3 focus:ring-2 focus:ring-emerald-600"
+              value={apiUrl}
+              onChange={(e) => setApiUrl(e.target.value)}
+              onBlur={() => apiUrl && apiKey && fetchInstances()}
+            />
+
+            <label className="text-gray-700 font-semibold text-sm block mb-1">API Key</label>
+            <input 
+              id="apiKey" 
+              type="text" 
+              placeholder="Enter API key"
+              className="border border-gray-300 rounded-lg px-3 py-2 w-full mb-3 focus:ring-2 focus:ring-emerald-600"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              onBlur={() => apiUrl && apiKey && fetchInstances()}
+            />
+
+            <label className="text-gray-700 font-semibold text-sm block mb-1">Instance Name</label>
+            <input 
+              id="instanceName" 
+              type="text" 
+              placeholder="Enter instance name"
+              className="border border-gray-300 rounded-lg px-3 py-2 w-full mb-3 focus:ring-2 focus:ring-emerald-600"
+              value={instanceName}
+              onChange={(e) => setInstanceName(e.target.value)}
+            />
+
+            <button id="generateQrBtn" className="btn-primary w-full py-2 rounded-lg font-semibold" onClick={generateQr}>Generate QR & Connect</button>
+
+            <div className="flex flex-col items-center mt-4">
+              {qrImage && <img id="qrImage" src={qrImage} alt="QR Code" style={{display: 'block'}} />}
+              <p id="statusMsg" className="text-center text-gray-600 text-sm mt-2">{statusMsg}</p>
+
+              {/* Progress area under QR */}
+              {showProgress && (
+                <div id="connProgressWrap" className="w-full mt-3">
+                  <div className="w-full bg-gray-100 rounded-full h-2">
+                    <div id="connProgressBar" className="bg-emerald-600 h-2 rounded-full" style={{width: `${progressPercent}%`}}></div>
+                  </div>
+                  <div id="connProgressText" className="text-xs text-gray-500 mt-1 text-center">{progressText}</div>
+                  <div className="mt-3 flex items-center justify-center gap-3">
+                    <button id="closeNowBtn" className="px-3 py-1.5 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 text-sm" onClick={closeModal}>Close</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reconnect Modal */}
+      {isReconnectModalOpen && (
+        <div id="reconnectModal" className="modal open items-center justify-center bg-black/40">
+          <div className="glass w-[480px] rounded-2xl p-6 relative">
+            <button id="closeReconnectModal" className="absolute right-3 top-3 text-gray-500 hover:text-gray-700 text-xl" onClick={closeReconnectModal}>&times;</button>
+            <h3 className="text-xl font-semibold text-gray-800 mb-1">Smart Reconnect</h3>
+            <p className="text-sm text-gray-500 mb-4">Automatically reconnect existing instance: <strong>{reconnectInstance}</strong></p>
+
+            <div className="bg-green-50 border-l-4 border-green-400 p-3 mb-4">
+              <div className="flex">
+                <div className="ml-3">
+                  <p className="text-sm text-green-700">
+                    <strong>🚀 Smart Reconnection:</strong> Will first try to restore your existing WhatsApp session automatically. 
+                    If session is expired, will generate QR code as fallback. No new instance will be created.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <button id="reconnectBtn" className="btn-primary w-full py-2 rounded-lg font-semibold" onClick={reconnectToInstance}>
+              � Smart Reconnect
+            </button>
+
+            <div className="flex flex-col items-center mt-4">
+              {qrImage && <img id="reconnectQrImage" src={qrImage} alt="QR Code" style={{display: 'block'}} />}
+              <p id="reconnectStatusMsg" className="text-center text-gray-600 text-sm mt-2">{statusMsg}</p>
+
+              {/* Progress area under QR */}
+              {showProgress && (
+                <div id="reconnectProgressWrap" className="w-full mt-3">
+                  <div className="w-full bg-gray-100 rounded-full h-2">
+                    <div id="reconnectProgressBar" className="bg-emerald-600 h-2 rounded-full" style={{width: `${progressPercent}%`}}></div>
+                  </div>
+                  <div id="reconnectProgressText" className="text-xs text-gray-500 mt-1 text-center">{progressText}</div>
+                  <div className="mt-3 flex items-center justify-center gap-3">
+                    <button id="closeReconnectNowBtn" className="px-3 py-1.5 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 text-sm" onClick={closeReconnectModal}>Close</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
+export default App
