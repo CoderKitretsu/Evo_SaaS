@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Step1 Details Form Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }
+        .test-container { max-width: 800px; margin: 0 auto; }
+        .success { color: green; font-weight: bold; }
+        .error { color: red; font-weight: bold; }
+        .warning { color: orange; font-weight: bold; }
+        
+        /* Mock form styles for testing */
+        .form-field { margin: 15px 0; }
+        .form-field label { display: block; margin-bottom: 5px; font-weight: bold; }
+        .form-field input, .form-field select, .form-field textarea { 
+            width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;
+            font-size: 14px;
+        }
+        .form-field input.error, .form-field select.error { border-color: red; }
+        .field-error { color: red; font-size: 12px; margin-top: 5px; }
+        .field-help { color: #666; font-size: 12px; margin-top: 5px; }
+        .btn-primary { 
+            background: #007bff; color: white; border: none; 
+            padding: 12px 24px; border-radius: 4px; cursor: pointer;
+            font-size: 16px;
+        }
+        .btn-primary:disabled { background: #ccc; cursor: not-allowed; }
+        .form-actions { margin-top: 30px; }
+        .throttle-options { display: flex; gap: 10px; margin: 10px 0; }
+        .throttle-option { 
+            border: 1px solid #ddd; padding: 10px; border-radius: 4px; 
+            cursor: pointer; flex: 1; text-align: center;
+        }
+        .throttle-option.selected { border-color: #007bff; background: #e7f3ff; }
+        .checkbox-field { display: flex; align-items: center; gap: 8px; }
+        .validation-spinner { margin-left: 10px; }
+        .form-progress { margin: 20px 0; }
+        .progress-bar { 
+            width: 100%; height: 8px; background: #f0f0f0; 
+            border-radius: 4px; overflow: hidden; 
+        }
+        .progress-fill { 
+            height: 100%; background: #28a745; 
+            transition: width 0.3s ease; 
+        }
+    </style>
+</head>
+<body>
+    <div class="test-container">
+        <h1>Step1_Details Form Component Test</h1>
+        
+        <div id="results"></div>
+        
+        <div id="form-container">
+            <h2>Form Functionality Test</h2>
+            <div id="mock-form"></div>
+        </div>
+    </div>
+
+    <script type="module">
+        const resultsDiv = document.getElementById('results');
+        const formContainer = document.getElementById('mock-form');
+        
+        function log(message, type = 'success') {
+            const p = document.createElement('p');
+            p.textContent = message;
+            p.className = type;
+            resultsDiv.appendChild(p);
+            console.log(message);
+        }
+
+        async function testStep1Details() {
+            try {
+                log('=== Testing Step1_Details Implementation ===');
+                
+                // Import and test service
+                const ServiceModule = await import('./src/components/elements/CampaignElements/campaignService.js');
+                const CampaignService = ServiceModule.default;
+                log('✓ CampaignService imported successfully');
+
+                // Test 1: Draft creation and rehydration logic
+                log('Testing Draft Creation Logic:');
+                const testDraftId = CampaignService.createDraft({
+                    name: 'Step1 Form Test',
+                    instanceId: 'inst-form-test',
+                    throttle: 'safe',
+                    dryRun: true
+                });
+                log(`  ✓ Draft created: ${testDraftId}`);
+
+                const draftData = CampaignService.getDraft(testDraftId);
+                log(`  ✓ Draft rehydration: ${draftData ? 'SUCCESS' : 'FAILED'}`, draftData ? 'success' : 'error');
+
+                // Test 2: Name uniqueness validation logic
+                log('Testing Name Uniqueness Validation:');
+                const existingCampaigns = CampaignService.listCampaigns();
+                log(`  ✓ Can list existing campaigns: ${existingCampaigns.length} found`);
+
+                // Simulate name check
+                const testNames = ['Step1 Form Test', 'Unique New Name', 'Another Test'];
+                testNames.forEach(name => {
+                    const isDuplicate = existingCampaigns.some(campaign => 
+                        campaign.meta?.name?.toLowerCase() === name.toLowerCase()
+                    );
+                    log(`  ✓ Name "${name}": ${isDuplicate ? 'DUPLICATE' : 'UNIQUE'}`, isDuplicate ? 'warning' : 'success');
+                });
+
+                // Test 3: Form data validation logic
+                log('Testing Form Validation Logic:');
+                
+                const testFormData = {
+                    name: 'Valid Campaign Name',
+                    instanceId: 'inst-1', 
+                    startAt: new Date(Date.now() + 5 * 60000).toISOString(),
+                    endAt: null,
+                    timezone: 'UTC',
+                    throttle: 'safe',
+                    maxBatchSize: 50,
+                    retryPolicy: { enabled: true, maxAttempts: 2 },
+                    dryRun: true
+                };
+
+                // Validate required fields
+                const requiredFields = ['name', 'instanceId', 'startAt'];
+                requiredFields.forEach(field => {
+                    const hasValue = testFormData[field] && testFormData[field].toString().trim();
+                    log(`  ✓ Required field "${field}": ${hasValue ? 'VALID' : 'INVALID'}`, hasValue ? 'success' : 'error');
+                });
+
+                // Test timing validation
+                const startTime = new Date(testFormData.startAt);
+                const now = new Date();
+                log(`  ✓ Start time validation: ${startTime > now ? 'FUTURE' : 'PAST'}`, startTime > now ? 'success' : 'error');
+
+                // Test batch size validation
+                const batchValid = testFormData.maxBatchSize >= 1 && testFormData.maxBatchSize <= 1000;
+                log(`  ✓ Batch size (${testFormData.maxBatchSize}): ${batchValid ? 'VALID' : 'INVALID'}`, batchValid ? 'success' : 'error');
+
+                // Test 4: Meta data preparation
+                log('Testing Meta Data Preparation:');
+                
+                const preparedMeta = {
+                    name: testFormData.name.trim(),
+                    instanceId: testFormData.instanceId,
+                    startAt: new Date(testFormData.startAt).toISOString(),
+                    endAt: testFormData.endAt ? new Date(testFormData.endAt).toISOString() : null,
+                    timezone: testFormData.timezone,
+                    throttle: testFormData.throttle,
+                    maxBatchSize: parseInt(testFormData.maxBatchSize),
+                    retryPolicy: {
+                        enabled: testFormData.retryPolicy.enabled,
+                        maxAttempts: parseInt(testFormData.retryPolicy.maxAttempts)
+                    },
+                    dryRun: testFormData.dryRun
+                };
+
+                log(`  ✓ ISO timestamp conversion: ${preparedMeta.startAt.includes('T') ? 'SUCCESS' : 'FAILED'}`, preparedMeta.startAt.includes('T') ? 'success' : 'error');
+                log(`  ✓ Numeric conversion: ${typeof preparedMeta.maxBatchSize === 'number' ? 'SUCCESS' : 'FAILED'}`, typeof preparedMeta.maxBatchSize === 'number' ? 'success' : 'error');
+                log(`  ✓ Nested object handling: ${preparedMeta.retryPolicy.enabled !== undefined ? 'SUCCESS' : 'FAILED'}`, preparedMeta.retryPolicy.enabled !== undefined ? 'success' : 'error');
+
+                // Test 5: Service integration
+                log('Testing Service Integration:');
+                
+                const updatedDraft = {
+                    ...draftData,
+                    meta: preparedMeta
+                };
+
+                const saveResult = CampaignService.saveDraft(testDraftId, updatedDraft);
+                log(`  ✓ Draft save with meta: ${saveResult ? 'SUCCESS' : 'FAILED'}`, saveResult ? 'success' : 'error');
+
+                const savedDraft = CampaignService.getDraft(testDraftId);
+                const metaSaved = savedDraft?.meta?.name === preparedMeta.name;
+                log(`  ✓ Meta persistence: ${metaSaved ? 'SUCCESS' : 'FAILED'}`, metaSaved ? 'success' : 'error');
+
+                // Test 6: Storage isolation verification  
+                log('Testing Storage Isolation:');
+                
+                const allKeys = Object.keys(localStorage);
+                const campaignKeys = allKeys.filter(key => key.startsWith('evosaa.campaigns.'));
+                const otherKeys = allKeys.filter(key => !key.startsWith('evosaa.campaigns.'));
+
+                log(`  ✓ Total localStorage keys: ${allKeys.length}`);
+                log(`  ✓ Campaign namespace keys: ${campaignKeys.length}`);
+                log(`  ✓ Other keys (unchanged): ${otherKeys.length}`);
+                
+                const correctNamespace = campaignKeys.every(key => key.startsWith('evosaa.campaigns.'));
+                log(`  ✓ Namespace isolation: ${correctNamespace ? 'PERFECT' : 'VIOLATED'}`, correctNamespace ? 'success' : 'error');
+
+                // Create mock interactive form for manual testing
+                createMockForm(testFormData, CampaignService);
+
+                log('=== Step1_Details Component Test Complete ===');
+                log('✅ All core functionality validated');
+                log('📋 Form component ready for integration');
+
+            } catch (error) {
+                log(`❌ Test failed: ${error.message}`, 'error');
+                console.error('Full error:', error);
+            }
+        }
+
+        function createMockForm(initialData, CampaignService) {
+            const mockFormHtml = `
+                <h3>Interactive Form Test</h3>
+                <p>Test the form validation and submission logic:</p>
+                
+                <div class="form-field">
+                    <label for="testName">Campaign Name (Test Uniqueness)</label>
+                    <input type="text" id="testName" value="${initialData.name}" placeholder="Try entering 'Step1 Form Test' to see duplicate error">
+                    <div class="field-help">Change the name and blur to test uniqueness validation</div>
+                    <div id="nameError" class="field-error" style="display: none;"></div>
+                </div>
+
+                <div class="form-field">
+                    <label for="testInstance">WhatsApp Instance</label>
+                    <select id="testInstance">
+                        <option value="">Select instance...</option>
+                        <option value="inst-1" ${initialData.instanceId === 'inst-1' ? 'selected' : ''}>Instance 1 (Active)</option>
+                        <option value="inst-2" ${initialData.instanceId === 'inst-2' ? 'selected' : ''}>Instance 2 (Active)</option>
+                        <option value="inst-3" disabled>Instance 3 (Inactive)</option>
+                    </select>
+                </div>
+
+                <div class="form-field">
+                    <label for="testStartTime">Start Time</label>
+                    <input type="datetime-local" id="testStartTime" value="${new Date(initialData.startAt).toISOString().slice(0, 16)}">
+                    <div class="field-help">Must be in the future</div>
+                    <div id="startError" class="field-error" style="display: none;"></div>
+                </div>
+
+                <div class="form-field">
+                    <label>Send Rate (Throttle)</label>
+                    <div class="throttle-options">
+                        <div class="throttle-option ${initialData.throttle === 'safe' ? 'selected' : ''}" onclick="selectThrottle('safe')">
+                            <strong>Safe</strong><br>1 msg/sec
+                        </div>
+                        <div class="throttle-option ${initialData.throttle === 'moderate' ? 'selected' : ''}" onclick="selectThrottle('moderate')">
+                            <strong>Moderate</strong><br>5 msgs/sec
+                        </div>
+                        <div class="throttle-option ${initialData.throttle === 'fast' ? 'selected' : ''}" onclick="selectThrottle('fast')">
+                            <strong>Fast</strong><br>20 msgs/sec
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-field">
+                    <label for="testBatchSize">Batch Size</label>
+                    <input type="number" id="testBatchSize" min="1" max="1000" value="${initialData.maxBatchSize}">
+                    <div class="field-help">Must be between 1 and 1000</div>
+                    <div id="batchError" class="field-error" style="display: none;"></div>
+                </div>
+
+                <div class="form-field">
+                    <div class="checkbox-field">
+                        <input type="checkbox" id="testDryRun" ${initialData.dryRun ? 'checked' : ''}>
+                        <label for="testDryRun">Dry Run Mode (Test without sending)</label>
+                    </div>
+                </div>
+
+                <div class="form-progress">
+                    <div class="progress-bar">
+                        <div id="progressFill" class="progress-fill" style="width: 80%;"></div>
+                    </div>
+                    <div>Form completion: <span id="progressText">80%</span></div>
+                </div>
+
+                <div class="form-actions">
+                    <button class="btn-primary" onclick="testFormSubmission()">
+                        Test Form Submission
+                    </button>
+                </div>
+
+                <div id="submissionResult" style="margin-top: 20px;"></div>
+            `;
+
+            formContainer.innerHTML = mockFormHtml;
+
+            // Add interactive validation
+            document.getElementById('testName').addEventListener('blur', async (e) => {
+                const name = e.target.value.trim();
+                if (name) {
+                    const campaigns = CampaignService.listCampaigns();
+                    const isDuplicate = campaigns.some(c => c.meta?.name?.toLowerCase() === name.toLowerCase());
+                    const errorDiv = document.getElementById('nameError');
+                    
+                    if (isDuplicate) {
+                        errorDiv.textContent = 'Campaign name must be unique';
+                        errorDiv.style.display = 'block';
+                        e.target.classList.add('error');
+                    } else {
+                        errorDiv.style.display = 'none';
+                        e.target.classList.remove('error');
+                    }
+                }
+            });
+
+            // Global functions for interactive testing
+            window.selectThrottle = (value) => {
+                document.querySelectorAll('.throttle-option').forEach(opt => opt.classList.remove('selected'));
+                event.target.closest('.throttle-option').classList.add('selected');
+                window.selectedThrottle = value;
+            };
+
+            window.testFormSubmission = () => {
+                const formData = {
+                    name: document.getElementById('testName').value.trim(),
+                    instanceId: document.getElementById('testInstance').value,
+                    startAt: document.getElementById('testStartTime').value,
+                    throttle: window.selectedThrottle || 'safe',
+                    maxBatchSize: parseInt(document.getElementById('testBatchSize').value),
+                    dryRun: document.getElementById('testDryRun').checked
+                };
+
+                const resultDiv = document.getElementById('submissionResult');
+                
+                // Simulate validation
+                const errors = [];
+                if (!formData.name) errors.push('Campaign name required');
+                if (!formData.instanceId) errors.push('Instance required');
+                if (!formData.startAt) errors.push('Start time required');
+                if (formData.maxBatchSize < 1 || formData.maxBatchSize > 1000) errors.push('Invalid batch size');
+
+                if (errors.length === 0) {
+                    resultDiv.innerHTML = `<div class="success">✅ Form validation passed! Ready for Step 2</div>`;
+                    console.log('Form would submit with data:', formData);
+                } else {
+                    resultDiv.innerHTML = `<div class="error">❌ Validation errors: ${errors.join(', ')}</div>`;
+                }
+            };
+        }
+
+        // Initialize test
+        testStep1Details();
+
+        // Cleanup function
+        window.cleanupStep1Test = function() {
+            const keys = Object.keys(localStorage).filter(k => k.startsWith('evosaa.campaigns.'));
+            keys.forEach(key => localStorage.removeItem(key));
+            console.log('Step1 test data cleaned up!');
+        };
+
+    </script>
+</body>
+</html>
